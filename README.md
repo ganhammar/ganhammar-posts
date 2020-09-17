@@ -1,1 +1,1 @@
-ganhammar-posts
+Database of posts for ganhammar.se
