@@ -1,0 +1,15 @@
+name: Upload Posts
+on: push
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+      - name: Check for changes and upload
+        uses: azure/CLI@v1
+        with:
+          inlineScript: |
+            cd scripts
+            sh ./upload-posts.sh ${{ secrets.ACCOUNT_NAME }} ${{ secrets.ACCOUNT_KEY }}
