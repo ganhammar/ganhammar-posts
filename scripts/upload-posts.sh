@@ -12,7 +12,7 @@ fi
 
 for file in $files; do
     while read line; do
-        if [[ $line == '#*' ]]
+        if [[ $line == \#* ]]
         then
             title=$(echo ${line:1} | awk '{$1=$1};1')
             break;
