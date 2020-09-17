@@ -7,9 +7,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v1
-      - name: Check for changes and upload
+      - uses: technote-space/get-diff-action@v3
+        with:
+          PREFIX_FILTER: posts
+          SUFFIX_FILTER: .md
+      - name: Upload
         uses: azure/CLI@v1
         with:
           inlineScript: |
             cd scripts
-            sh ./upload-posts.sh ${{ secrets.ACCOUNT_NAME }} ${{ secrets.ACCOUNT_KEY }} `git diff --name-only | grep -E '^posts\/.*md$' `
+            sh ./upload-posts.sh ${{ secrets.ACCOUNT_NAME }} ${{ secrets.ACCOUNT_KEY }} ${{ env.GIT_DIFF }}
