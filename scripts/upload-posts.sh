@@ -2,8 +2,8 @@
 
 accountName=$1
 accountKey=$2
+files=$3
 container="posts"
-files=`git diff --name-only | grep -E '^posts\/.*md$' `
 
 if [ -z "$files" ]
 then
@@ -12,7 +12,7 @@ fi
 
 for file in $files; do
     while read line; do
-        if [ $line == \#* ]
+        if [[ $line == \#* ]]
         then
             title=$(echo ${line:1} | awk '{$1=$1};1')
             break;

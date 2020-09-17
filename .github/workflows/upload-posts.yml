@@ -12,4 +12,4 @@ jobs:
         with:
           inlineScript: |
             cd scripts
-            sh ./upload-posts.sh ${{ secrets.ACCOUNT_NAME }} ${{ secrets.ACCOUNT_KEY }}
+            sh ./upload-posts.sh ${{ secrets.ACCOUNT_NAME }} ${{ secrets.ACCOUNT_KEY }} `git diff --name-only | grep -E '^posts\/.*md$' `
