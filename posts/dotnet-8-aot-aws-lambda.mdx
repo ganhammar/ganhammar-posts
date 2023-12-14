@@ -4,6 +4,8 @@ id: dotnet-8-aot-aws-lambda
 date: 2023-10-12
 ---
 
-# Dotnet 8 Native AOT example using CDK
+# Dotnet 8 Native AOT Using CDK
 
-The managed runtime for dotnet 8 is yet to be released, but, using Amazon Linux 2023 custom Lambda runtime, you can still run dotnet 8 projects.
+The managed runtime for dotnet 8 is yet to be released, but, using Amazon Linux 2023 custom Lambda runtime, you can still run dotnet 8 projects. In this post, we will delve into building native Ahead-of-Time (AOT) compiled applications and how build and deploy them to AWS Lambda using CDK and GitHub actions.
+
+The benefits of compiling dotnet applications to native code before it's run is that you can significantly improve the startup performance of your application. However, there are several considerations to keep in mind when building native AOT applications in Dotnet. These include understanding the trade-offs between Just-In-Time (JIT) and AOT compilation, managing dependencies, handling reflection, and more.
