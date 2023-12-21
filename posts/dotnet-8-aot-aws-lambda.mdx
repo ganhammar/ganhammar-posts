@@ -6,6 +6,121 @@ date: 2023-10-12
 
 # Dotnet 8 Native AOT Using CDK
 
-The managed runtime for dotnet 8 is yet to be released, but, using Amazon Linux 2023 custom Lambda runtime, you can still run dotnet 8 projects. In this post, we will delve into building native Ahead-of-Time (AOT) compiled applications and how build and deploy them to AWS Lambda using CDK and GitHub actions.
+The managed runtime for dotnet 8 is yet to be released, but, using Amazon Linux 2023 custom Lambda runtime, you can still run dotnet 8 projects. In this post, we will delve into building native Ahead-of-Time (AOT) compiled applications and deploy them to AWS Lambda using CDK and GitHub actions.
 
-The benefits of compiling dotnet applications to native code before it's run is that you can significantly improve the startup performance of your application. However, there are several considerations to keep in mind when building native AOT applications in Dotnet. These include understanding the trade-offs between Just-In-Time (JIT) and AOT compilation, managing dependencies, handling reflection, and more.
+The benefits of compiling dotnet applications to native code before it's run is that you can significantly improve the startup performance of your application. However, there are several considerations to keep in mind when building native AOT applications in Dotnet.
+
+## Considerations
+
+Building native AOT applications in Dotnet comes with its own set of trade-offs that must be considered:
+
+1. **Performance vs Size**: AOT compilation can significantly improve the startup performance of your application, as the code is already compiled to native code before it's run. However, this comes at the cost of increased binary size, as the entire dotnet runtime and all dependencies are included in the compiled output.
+
+2. **Compile Time**: AOT compilation takes longer than JIT compilation, as it needs to compile all code up front. This can slow down your build and deployment process.
+
+3. **Reflection and Dynamic Loading**: AOT has limitations when it comes to reflection and dynamic loading. If your application heavily relies on these features, you may need to make significant changes to your code or consider if AOT is the right choice for your application.
+
+4. **Cross-Platform Compatibility**: While dotnet is cross-platform, AOT compiled applications are not. An AOT compiled application is specific to the platform it was compiled on, which can limit its portability.
+
+Understanding these trade-offs can help you make an informed decision about whether AOT compilation is the right choice for your Dotnet application.
+
+# Configure Dotnet Application to Publish AOT
+
+The first thing that we need to do is to update the project file (csproj) to enable AOT publishing.
+
+```xml
+<PropertyGroup>
+    <PublishAot>true</PublishAot>
+</PropertyGroup>
+```
+
+Since JSON serialization requires reflections, we must overcome this limitation by creating a serializer context for the application by extending the `JsonSerializerContext`-class. This class allows us to specify the schema of our data at compile time, eliminating the need for reflections at runtime and making our application compatible with AOT compilation.
+
+```c#
+using System.Text.Json.Serialization;
+using Amazon.Lambda.APIGatewayEvents;
+
+namespace GetFunction;
+
+[JsonSerializable(typeof(APIGatewayHttpApiV2ProxyRequest))]
+[JsonSerializable(typeof(APIGatewayHttpApiV2ProxyResponse))]
+[JsonSerializable(typeof(List<string>))]
+[JsonSerializable(typeof(Dictionary<string, string>))]
+public partial class CustomJsonSerializerContext : JsonSerializerContext
+{
+}
+```
+
+Since some dependencies cannot be detected through static code analysis, we need to inform the linker that some types are required at runtime. This can be done through the `DynamicDependency`-attribute.
+
+Then we need to configure the Lambda handler, since we're running a custom runtime. This is done through the `LambdaBootstrapBuilder`. We also need to configure how to handle JSON serialization and deserialization for the function's input and output, which is done through the `SourceGeneratorLambdaJsonSerializer` where we pass our `CustomJsonSerializerContext`.
+
+```c#
+using System.Diagnostics.CodeAnalysis;
+using System.Net;
+using Amazon.Lambda.APIGatewayEvents;
+using Amazon.Lambda.Core;
+using Amazon.Lambda.RuntimeSupport;
+using Amazon.Lambda.Serialization.SystemTextJson;
+
+namespace GetFunction;
+
+public class Function
+{
+  [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(Function))]
+  [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(APIGatewayHttpApiV2ProxyRequest))]
+  [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(APIGatewayHttpApiV2ProxyResponse))]
+  static Function()
+  {
+  }
+
+  private static async Task Main()
+  {
+    Func<APIGatewayHttpApiV2ProxyRequest, ILambdaContext, APIGatewayHttpApiV2ProxyResponse> handler = FunctionHandler;
+    await LambdaBootstrapBuilder
+      .Create(handler, new SourceGeneratorLambdaJsonSerializer<CustomJsonSerializerContext>(options =>
+      {
+        options.PropertyNameCaseInsensitive = true;
+      }))
+      .Build()
+      .RunAsync();
+  }
+
+  public static APIGatewayHttpApiV2ProxyResponse FunctionHandler(
+    APIGatewayHttpApiV2ProxyRequest apiGatewayHttpApiV2ProxyRequest, ILambdaContext context)
+  {
+    return new APIGatewayHttpApiV2ProxyResponse
+    {
+      StatusCode = (int)HttpStatusCode.OK,
+      Body = $"Hello from AOT Lambda 👋"
+    };
+  }
+}
+```
+
+# Defining the Stack
+
+Since GitHub actions doesn't natively support ARM64 runners and dotnet [doesn't support QEMU](https://github.com/dotnet/core/blob/main/release-notes/8.0/supported-os.md#qemu), we're going to target `linux-x64`. We also need to make sure to set the runtime to `PROVIDED_AL2023`.
+
+```c#
+new Function(this, "GetFunction", new FunctionProps
+{
+  Runtime = Runtime.PROVIDED_AL2023,
+  Architecture = Architecture.X86_64,
+  Handler = "GetFunction::GetFunction.Function::FunctionHandler",
+  Code = Code.FromAsset($"./.output/GetFunction.zip"),
+  Timeout = Duration.Minutes(1),
+  MemorySize = 128,
+  LogRetention = RetentionDays.ONE_DAY,
+});
+```
+
+# Setting up the GitHub Pipeline
+
+The GitHub pipeline for this project is relatively simple, we just need to run `restore`, `build`, and `publish`. Then create the zip file to be published using CDK. Full example can be found in the GitHub repository for this post ([here](https://github.com/ganhammar/dotnet-8-aot-aws-lambda/blob/main/.github/workflows/main.yml)).
+
+# Summary
+
+With dotnet 8, AOT support has improved through the introduction of more comprehensive tooling and better integration with the dotnet build process, making it easier to create efficient, self-contained applications that don't require a JIT compiler. Setting up dotnet 8 AOT applications and deploying them to AWS Lambda is now relatively pain free, eventhough there is a lot of thresholds to pass.
+
+GitHub repository for the example project mentioned in this post can be found [here](https://github.com/ganhammar/dotnet-8-aot-aws-lambda/tree/main).
