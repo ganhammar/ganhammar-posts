@@ -92,7 +92,7 @@ public class Function
     return new APIGatewayHttpApiV2ProxyResponse
     {
       StatusCode = (int)HttpStatusCode.OK,
-      Body = $"Hello from AOT Lambda 👋"
+      Body = "Hello from AOT Lambda 👋"
     };
   }
 }
@@ -108,7 +108,7 @@ new Function(this, "GetFunction", new FunctionProps
   Runtime = Runtime.PROVIDED_AL2023,
   Architecture = Architecture.X86_64,
   Handler = "GetFunction::GetFunction.Function::FunctionHandler",
-  Code = Code.FromAsset($"./.output/GetFunction.zip"),
+  Code = Code.FromAsset("./.output/GetFunction.zip"),
   Timeout = Duration.Minutes(1),
   MemorySize = 128,
   LogRetention = RetentionDays.ONE_DAY,
