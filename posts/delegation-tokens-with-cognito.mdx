@@ -1,0 +1,29 @@
+---
+title: Delegation Tokens with Amazon Cognito
+id: dotnet-8-aot-aws-lambda
+date: 2023-12-23
+---
+
+# Delegation Tokens with Amazon Cognito
+
+The Delegation or On-Behalf-Of (OBO) flow is used when a service, often an API, needs to perform an action, often calling another API, on behalf of the end-user. This to ensure that the end-user has the permissions required to perform the action in the target service. The flow is not a part of the original OAuth 2.0 specification (RFC 6749), it is an extension introduced by Microsoft.
+
+How the flow works:
+
+1. The client (an application that interacts with the end-user, e.g a web or mobile application) autenticates the end-user and obtains an access token from the authorization server.
+2. The client calls the initial API, API A, passing along the access token.
+3. The access token is only scoped to be able to call API A, therefore the API needs to request a new access token which is scoped to call the second API, API B. To ensure that the end-user also has the correct permissions to call API B, it passes along the original access token.
+4. The authorization server validates the incoming token and the clients credentials, and issues a new access token.
+5. API A uses this new access token to call API B, which is then scoped to be able to access API B and based on the end-users permissions.
+
+# Implementation, the Cognito Way 
+
+Amazon Cognito does not support this flow out-of-the box, however, they do support custom authentication flows, which we can use for our solution. Custom authentication flows are defined using AWS Lambda triggers. These triggers can be used to add custom validation, challenges for the user, such as additional authentication factors, or even to integrate with external systems.
+
+The triggers are:
+
+1. **Define Auth Challenge** which is used to determine the next challenge in a custom auth flow, such as asking the user for additional information, or calling an external system.
+2. **Create Auth Challenge** which is used to create a custom auth challenge for the end-user, based on the session information and the challenge name. Such as emailing a one-time password, which is also passed down stream to Cognito.
+3. **Verify Auth Challenge** which is used to determine if the response is correct. In the one-time password example, it verifies that the answer from the end-user matches what was passed down stream.
+
+We can use this custom authentication flow to implement the delegation flow. We utilize the Define Auth Challenge lambda to return a DELEGATION challenge for the end-user and the Verify Auth Challenge lambda to verify that the answer contains a valid JWT.
