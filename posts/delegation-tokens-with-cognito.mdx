@@ -27,3 +27,33 @@ The triggers are:
 3. **Verify Auth Challenge** which is used to determine if the response is correct. In the one-time password example, it verifies that the answer from the end-user matches what was passed down stream.
 
 We can use this custom authentication flow to implement the delegation flow. We utilize the Define Auth Challenge lambda to return a DELEGATION challenge for the end-user and the Verify Auth Challenge lambda to verify that the answer contains a valid JWT.
+
+The problem with the custom auth flow is that we cannot request any scope(s) with the token request, but it is possible to pass client metadata with the request. We can use this parameter together with the Cognito trigger "Pre Token Generation", which can be used to add or remove claims and scopes, to add the necissary scopes required in order to call API B. As of a week ago, we can use this trigger to also modify the access token properties (which requires Cognito Advanced Security).
+
+## Defining the Stack
+
+We will use CDK to define our stack, I will focus on the parts essential for this solution, the complete example can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito).
+
+Let's start with creating the UserPool and enabling advanced security mode:
+
+```typescript
+// Create user pool
+const userPool = new UserPool(this, "UserPool", {
+    userPoolName: "delegation",
+    customAttributes: {
+    permission: new StringAttribute({ mutable: true }),
+    },
+});
+
+userPool.addDomain("UserPoolDomain", {
+    cognitoDomain: {
+    domainPrefix: "delegation",
+    },
+});
+
+// Enable advanced security
+const cfnUserPool = userPool.node.defaultChild as CfnUserPool;
+cfnUserPool.userPoolAddOns = {
+    advancedSecurityMode: "ENFORCED",
+};
+```
