@@ -224,3 +224,71 @@ userPool.addTrigger(
   defineAuthChallenge
 );
 ```
+
+Lastly we will create the Verify Auth Challenge Response Lambda. This Lambda needs to verify the end-users Access Token, which there is loads of examples of out there. The source code for how I did it in the example below can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/utils/verify-token.ts).
+
+```typescript
+import { Callback, Context, VerifyAuthChallengeResponseTriggerEvent } from "aws-lambda";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+import { validateToken } from "./utils/verify-token";
+
+exports.handler = async function (
+  event: VerifyAuthChallengeResponseTriggerEvent,
+  _: Context,
+  callback: Callback
+) {
+  const region = process.env.AWS_REGION!;
+  const ssmClient = new SSMClient({ region });
+  const command = new GetParameterCommand({ Name: "/delegation/userpool/id" });
+  const userPoolId = (await ssmClient.send(command)).Parameter!.Value!;
+
+  // Check if the user's answer matches the secret code
+  if (event.request.challengeAnswer) {
+    const result = await validateToken(event.request.challengeAnswer, userPoolId, region);
+
+    if (result) {
+      event.response.answerCorrect = true;
+    }
+  } else {
+    event.response.answerCorrect = false;
+  }
+
+  callback(null, event);
+};
+```
+
+And use the Lambda handler as a trigger in our UserPool:
+
+```typescript
+// Define verify auth challenge response lambda
+const verifyAuthChallengeResponse = new NodejsFunction(
+  this,
+  "VerifyAuthChallengeResponse",
+  {
+    runtime: Runtime.NODEJS_20_X,
+    handler: "handler",
+    entry: `${__dirname}/handlers/verify-auth-challenge-response.ts`,
+    memorySize: MEMORY_SIZE,
+    environment: {
+      REGION: this.region,
+    },
+  }
+);
+
+verifyAuthChallengeResponse.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      Stack.of(this).formatArn({
+        service: "ssm",
+        resource: "parameter/delegation/userpool/id",
+      }),
+    ],
+  })
+);
+
+userPool.addTrigger(
+  UserPoolOperation.VERIFY_AUTH_CHALLENGE_RESPONSE,
+  verifyAuthChallengeResponse
+);
+```
