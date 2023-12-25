@@ -34,26 +34,193 @@ The problem with the custom auth flow is that we cannot request any scope(s) wit
 
 We will use CDK to define our stack, I will focus on the parts essential for this solution, the complete example can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito).
 
-Let's start with creating the UserPool and enabling advanced security mode:
+Let's start with creating a new CDK project by running `cdk init app --language typescript` in an empty folder called "delegation" and edit the `delegation-stack.ts`-file to add a UserPool and enable advanced security mode:
 
 ```typescript
 // Create user pool
 const userPool = new UserPool(this, "UserPool", {
-    userPoolName: "delegation",
-    customAttributes: {
+  userPoolName: "delegation",
+  customAttributes: {
     permission: new StringAttribute({ mutable: true }),
-    },
+  },
 });
 
 userPool.addDomain("UserPoolDomain", {
-    cognitoDomain: {
+  cognitoDomain: {
     domainPrefix: "delegation",
-    },
+  },
 });
 
 // Enable advanced security
 const cfnUserPool = userPool.node.defaultChild as CfnUserPool;
 cfnUserPool.userPoolAddOns = {
-    advancedSecurityMode: "ENFORCED",
+  advancedSecurityMode: "ENFORCED",
 };
+
+// Store user pool id in SSM, to be used by Lambda integrations
+new StringParameter(this, "UserPoolIdParameter", {
+  parameterName: "/delegation/userpool/id",
+  stringValue: userPool.userPoolId,
+});
+```
+
+Then we will add a resource server to manage the scopes required to access our different services, in this example I will add a booking service and a review service.
+
+```typescript
+// Add resource server
+const resourceServer = userPool.addResourceServer("ResourceServer", {
+  identifier: "resources",
+  scopes: [
+    {
+      scopeName: "booking-service",
+      scopeDescription: "Access booking service",
+    },
+    {
+      scopeName: "review-service",
+      scopeDescription: "Access review service",
+    },
+  ],
+});
+```
+
+Next we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 has not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
+
+```typescript
+export const handler = async (event: PreTokenGenerationTriggerHandler) => {
+  const scopesToAdd = [];
+
+  // Check if the clientMetadata property is set and contains scope
+  if (event.request?.clientMetadata?.scope) {
+    const scopes = event.request.clientMetadata.scope.split(" ");
+
+    // Verify that the client actually has access to the requested scope(s)
+    const cognitoClient = new CognitoIdentityProviderClient({
+      region: "eu-north-1",
+    });
+
+    const region = process.env.AWS_REGION!;
+    const ssmClient = new SSMClient({ region });
+    const ssmCommand = new GetParameterCommand({
+      Name: "/delegation/userpool/id",
+    });
+    const userPoolId = (await ssmClient.send(ssmCommand)).Parameter!.Value!;
+
+    const command = new DescribeUserPoolClientCommand({
+      UserPoolId: userPoolId,
+      ClientId: event.callerContext.clientId,
+    });
+
+    const data = await cognitoClient.send(command);
+
+    const clientScopes = data.UserPoolClient?.AllowedOAuthScopes || [];
+
+    for (const scope of scopes) {
+      if (clientScopes.includes(scope)) {
+        scopesToAdd.push(event.request.clientMetadata.scope);
+      }
+    }
+  }
+
+  event.response = {
+    claimsAndScopeOverrideDetails: {
+      idTokenGeneration: {
+        scopesToAdd,
+      },
+      accessTokenGeneration: {
+        scopesToAdd,
+      },
+    },
+  };
+
+  return event;
+};
+```
+
+Then we will continue to update our stack and add the Pre Token Generation trigger:
+
+```typescript
+// Define pre token generation lambda
+const preTokenGeneration = new NodejsFunction(this, "PreTokenGeneration", {
+  runtime: Runtime.NODEJS_20_X,
+  handler: "handler",
+  entry: `${__dirname}/handlers/pre-token-generation.ts`,
+  memorySize: 1769,
+});
+
+preTokenGeneration.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      Stack.of(this).formatArn({
+        service: "ssm",
+        resource: "parameter/delegation/userpool/id",
+      }),
+    ],
+  }),
+);
+
+preTokenGeneration.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["cognito-idp:DescribeUserPoolClient"],
+    resources: ["*"],
+  })
+);
+
+userPool.addTrigger(
+  UserPoolOperation.PRE_TOKEN_GENERATION,
+  preTokenGeneration
+); // Needs to be changed to V2_0 in console until CDK supports it
+```
+
+Next we will define the Define Auth Challenge Lambda in the same folder as our other handler:
+
+```typescript
+import { Callback, Context, DefineAuthChallengeTriggerEvent } from "aws-lambda";
+
+exports.handler = function (
+  event: DefineAuthChallengeTriggerEvent,
+  _: Context,
+  callback: Callback
+) {
+  if (event.request.session.length === 0) {
+    // If it's the first sign in attempt, present the password verifier challenge
+    event.response.issueTokens = false;
+    event.response.failAuthentication = false;
+    event.response.challengeName = "DELEGATION";
+  } else if (
+    event.request.session.length === 1 &&
+    event.request.session[0].challengeResult === true
+  ) {
+    // If the password verifier returns a successful result, issue tokens
+    event.response.issueTokens = true;
+    event.response.failAuthentication = false;
+  } else {
+    // If the password verifier returns a failed result, fail authentication
+    event.response.issueTokens = false;
+    event.response.failAuthentication = true;
+  }
+
+  callback(null, event);
+};
+```
+
+And update our stack to connect the handler with the UserPool:
+
+```typescript
+// Define auth challenge lambda
+const defineAuthChallenge = new NodejsFunction(
+  this,
+  "DefineAuthChallenge",
+  {
+    runtime: Runtime.NODEJS_20_X,
+    handler: "handler",
+    entry: `${__dirname}/handlers/define-auth-challenge.ts`,
+    memorySize: MEMORY_SIZE,
+  }
+);
+
+userPool.addTrigger(
+  UserPoolOperation.DEFINE_AUTH_CHALLENGE,
+  defineAuthChallenge
+);
 ```
