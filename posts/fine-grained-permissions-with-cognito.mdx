@@ -11,4 +11,19 @@ status: draft
 
 ## Amazon Cognito Lambda Triggers
 
-Amazon Cognito has support for different Lambda triggers that can be used to customize the behavior of a user pool at various points in the authentication and authorization process. In [my previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito), I explained how some of these triggers can be used to implement the delegation (or on-behalf-of) flow using Amazon Cognito, one of the triggers used in that solution is the "Pre Token Generation" trigger. This trigger can be used to add or remove properties of the id and access token.
+Amazon Cognito has support for [different Lambda triggers](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-identity-pools-working-with-aws-lambda-triggers.html) that can be used to customize the behavior of a user pool at various points in the authentication and authorization process. In [my previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito), I explained how some of these triggers can be used to implement the delegation (or on-behalf-of) flow using Amazon Cognito, one of the triggers used in that solution is the "Pre Token Generation" trigger. This trigger can be used to add or remove properties of the id and access token, which is exactly what we need to be able to implement fine grained authorization in our application.
+
+## Structuing the Permissions
+
+In order to keep the id and access token relatively slim, we need to ensure that we only add the permissions valid for the current authorization context, based on the client that is requesting the token. In this example we will work with a booking application, the solution will contain two different domains, one that handles booking and one that handles reviews. When our front end application requests an access token for the end user, we know that it will only communicate with the booking services, not with the review service, therefore we only need to add permissions relevant to that domain.
+
+We also know that there will likely be a lot of users using our application over time, therefore we need to ensure that we have a easy way to manage the permissions for our user base, we can't add and remove permissions on each and every user, instead we need a role-concept. We bind permissions to roles rather than to the users directly. Amazon Cognito has a user group concept that we can utilize for this use case, users of the group "User" gets a certain list of permissions and users of the group "Admin" gets another.
+
+Based on this, this is how we will structure our permissions for this solution:
+
+| Client | Role | Permissions |
+|-------|-------|-------|
+| BookingFrontClient | Admin | booking:read, booking:write, booking:delete |
+| BookingFrontClient | User | booking:read |
+| BookingServiceClient | Admin | review:read, review:write, review:delete |
+| BookingServiceClient | User | review:read |
