@@ -1,11 +1,11 @@
 ---
-title: Fine Grained Permissions with Amazon Cognito
-id: fine-grained-permissions-with-cognito
+title: Fine Grained Authorization with Amazon Cognito
+id: fine-grained-authorization-with-amazon-cognito
 date: 2023-12-27
 status: draft
 ---
 
-# Fine Grained Permissions with Amazon Cognito
+# Fine Grained Authorization with Amazon Cognito
 
 [As of a week ago](https://aws.amazon.com/about-aws/whats-new/2023/12/amazon-cognito-user-pools-customize-access-tokens/), you can now modify the contents of the access token, making it possible to add fine grained authorization decisions to your application that is leveraging Amazon Cognito for user authentication. Previously it has only been possible to modify the contents of the id token, which should soly be used to authenticate the user, not to authorize operations. This is what the access token is for. Modifying the properties of the access token requires that the User Pool is configured to enforce Advanced Security.
 
@@ -27,3 +27,58 @@ Based on this, this is how we will structure our permissions for this solution:
 | BookingFrontClient | User | booking:read |
 | BookingServiceClient | Admin | review:read, review:write, review:delete |
 | BookingServiceClient | User | review:read |
+
+# Implementation
+
+We will use CDK to define our stack, I will focus on the parts essential for this solution, the complete example can be found [here](https://github.com/ganhammar/fine-grained-permissions-with-amazon-cognito).
+
+Let's start with creating a new CDK project by running `cdk init app --language typescript` in an empty folder called "permissions" and edit the `permissions-stack.ts`-file to add a UserPool and enable advanced security mode:
+
+```typescript
+// Create user pool
+const userPool = new UserPool(this, "UserPool", {
+  userPoolName: "delegation",
+  customAttributes: {
+    permission: new StringAttribute({ mutable: true }),
+  },
+});
+
+userPool.addDomain("UserPoolDomain", {
+  cognitoDomain: {
+    domainPrefix: "delegation",
+  },
+});
+
+// Enable advanced security
+const cfnUserPool = userPool.node.defaultChild as CfnUserPool;
+cfnUserPool.userPoolAddOns = {
+  advancedSecurityMode: "ENFORCED",
+};
+
+// Store user pool id in SSM, to be used by Lambda integrations
+new StringParameter(this, "UserPoolIdParameter", {
+  parameterName: "/delegation/userpool/id",
+  stringValue: userPool.userPoolId,
+});
+```
+
+Then we will add a resource server to manage the scopes required to access our different services, as mentioned, in this example I will add a booking service and a review service.
+
+```typescript
+// Add resource server
+const resourceServer = userPool.addResourceServer("ResourceServer", {
+  identifier: "resources",
+  scopes: [
+    {
+      scopeName: "booking-service",
+      scopeDescription: "Access booking service",
+    },
+    {
+      scopeName: "review-service",
+      scopeDescription: "Access review service",
+    },
+  ],
+});
+```
+
+Next, we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/fine-grained-permissions-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
