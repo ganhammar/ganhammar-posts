@@ -1,23 +1,23 @@
 ---
-title: Fine Grained Authorization with Amazon Cognito
+title: Fine-Grained Authorization with Amazon Cognito
 id: fine-grained-authorization-with-amazon-cognito
 date: 2023-12-27
 status: draft
 ---
 
-# Fine Grained Authorization with Amazon Cognito
+# Fine-Grained Authorization with Amazon Cognito
 
-[As of a week ago](https://aws.amazon.com/about-aws/whats-new/2023/12/amazon-cognito-user-pools-customize-access-tokens/), you can now modify the contents of the access token, making it possible to add fine grained authorization decisions to your application that is leveraging Amazon Cognito for user authentication. Previously it has only been possible to modify the contents of the id token, which should soly be used to authenticate the user, not to authorize operations. This is what the access token is for. Modifying the properties of the access token requires that the User Pool is configured to enforce Advanced Security.
+[As of a week ago](https://aws.amazon.com/about-aws/whats-new/2023/12/amazon-cognito-user-pools-customize-access-tokens/), you can now modify the contents of the access token, making it possible to add fine-grained authorization decisions to your application that is leveraging Amazon Cognito for user authentication. Previously it has only been possible to modify the contents of the id token, which should solely be used to authenticate the user, not to authorize operations. This is what the access token is for. Modifying the properties of the access token requires that the User Pool is configured to enforce Advanced Security.
 
 ## Amazon Cognito Lambda Triggers
 
-Amazon Cognito has support for [different Lambda triggers](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-identity-pools-working-with-aws-lambda-triggers.html) that can be used to customize the behavior of a user pool at various points in the authentication and authorization process. In [my previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito), I explained how some of these triggers can be used to implement the delegation (or on-behalf-of) flow using Amazon Cognito, one of the triggers used in that solution is the "Pre Token Generation" trigger. This trigger can be used to add or remove properties of the id and access token, which is exactly what we need to be able to implement fine grained authorization in our application.
+Amazon Cognito has support for [different Lambda triggers](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-identity-pools-working-with-aws-lambda-triggers.html) that can be used to customize the behavior of a user pool at various points in the authentication and authorization process. In [my previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito), I explained how some of these triggers can be used to implement the delegation (or on-behalf-of) flow using Amazon Cognito, one of the triggers used in that solution is the "Pre Token Generation" trigger. This trigger can be used to add or remove properties of the id and access token, which is exactly what we need to be able to implement fine-grained authorization in our application.
 
 ## Structuing the Permissions
 
-In order to keep the id and access token relatively slim, we need to ensure that we only add the permissions valid for the current authorization context, based on the client that is requesting the token. In this example we will work with a booking application, the solution will contain two different domains, one that handles booking and one that handles reviews. When our front end application requests an access token for the end user, we know that it will only communicate with the booking services, not with the review service, therefore we only need to add permissions relevant to that domain.
+To keep the id and access token relatively slim, we need to ensure that we only add the permissions valid for the current authorization context, based on the client that is requesting the token. In this example we will work with a booking application, the solution will contain two different domains, one that handles booking and one that handles reviews. When our front-end application requests an access token for the end user, we know that it will only communicate with the booking services, not with the review service, therefore we only need to add permissions relevant to that domain.
 
-We also know that there will likely be a lot of users using our application over time, therefore we need to ensure that we have a easy way to manage the permissions for our user base, we can't add and remove permissions on each and every user, instead we need a role-concept. We bind permissions to roles rather than to the users directly. Amazon Cognito has a user group concept that we can utilize for this use case, users of the group "User" gets a certain list of permissions and users of the group "Admin" gets another.
+We also know that there will likely be a lot of users using our application over time, therefore we need to ensure that we have an easy way to manage the permissions for our user base, we can't add and remove permissions on every user, instead, we need a role-concept. We bind permissions to roles rather than to the users directly. Amazon Cognito has a user group concept that we can utilize for this use case, users of the group "User" get a certain list of permissions, and users of the group "Admin" get another.
 
 Based on this, this is how we will structure our permissions for this solution:
 
@@ -37,7 +37,7 @@ Let's start with creating a new CDK project by running `cdk init app --language 
 ```typescript
 // Create user pool
 const userPool = new UserPool(this, "UserPool", {
-  userPoolName: "delegation",
+  userPoolName: "permissions",
   customAttributes: {
     permission: new StringAttribute({ mutable: true }),
   },
@@ -45,7 +45,7 @@ const userPool = new UserPool(this, "UserPool", {
 
 userPool.addDomain("UserPoolDomain", {
   cognitoDomain: {
-    domainPrefix: "delegation",
+    domainPrefix: "permissions",
   },
 });
 
@@ -57,12 +57,12 @@ cfnUserPool.userPoolAddOns = {
 
 // Store user pool id in SSM, to be used by Lambda integrations
 new StringParameter(this, "UserPoolIdParameter", {
-  parameterName: "/delegation/userpool/id",
+  parameterName: "/permissions/userpool/id",
   stringValue: userPool.userPoolId,
 });
 ```
 
-Then we will add a resource server to manage the scopes required to access our different services, as mentioned, in this example I will add a booking service and a review service.
+Then we will add a resource server to manage the scopes required to access our different services, as mentioned, in this example, I will add a booking service and a review service.
 
 ```typescript
 // Add resource server
@@ -81,4 +81,117 @@ const resourceServer = userPool.addResourceServer("ResourceServer", {
 });
 ```
 
-Next, we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/fine-grained-permissions-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
+We will use DynamoDB to store the client permissions, let's define the table next:
+
+```typescript
+// Add dynamodb table to store permissions in
+const table = new Table(this, "Permissions", {
+  partitionKey: { name: "pk", type: AttributeType.STRING },
+  sortKey: { name: "sk", type: AttributeType.STRING },
+  tableName: "Permissions",
+  billingMode: BillingMode.PAY_PER_REQUEST,
+});
+```
+
+We will also add the Admin and User groups that we will use to tie permissions to:
+
+```typescript
+// Add Admin group to user pool
+new CfnUserPoolGroup(this, "AdminGroup", {
+  groupName: "Admin",
+  userPoolId: userPool.userPoolId,
+  description: "Admin group",
+});
+
+// Add User group to user pool
+new CfnUserPoolGroup(this, "UserGroup", {
+  groupName: "User",
+  userPoolId: userPool.userPoolId,
+  description: "User group",
+});
+```
+
+Next, we will define the Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/fine-grained-permissions-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
+
+```typescript
+import { BatchGetItemCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
+
+// Type definitions
+
+const client = new DynamoDBClient({ region: "eu-north-1" });
+const tableName = process.env.TABLE_NAME!;
+
+export const handler = async (
+  event: PreTokenGenerationTriggerHandler
+) => {
+  const claims = event.request.userAttributes;
+  const groups = event.request.groupConfiguration.groupsToOverride;
+
+  const command = new BatchGetItemCommand({
+    RequestItems: {
+      [tableName]: {
+        Keys: groups.map((group) => ({
+          pk: { S: event.callerContext.clientId },
+          sk: { S: group },
+        })),
+      },
+    },
+  });
+  const data = await client.send(command);
+
+  const permissions = [...new Set(data.Responses![tableName].map(
+    (item) => item.permissions.SS ?? []
+  ).flat())];
+
+  claims["permissions"] = permissions.join(",");
+
+  event.response = {
+    claimsAndScopeOverrideDetails: {
+      idTokenGeneration: {
+        claimsToAddOrOverride: claims,
+      },
+      accessTokenGeneration: {
+        claimsToAddOrOverride: claims,
+      },
+    },
+  };
+
+  return event;
+};
+```
+
+In the code above we look up permissions based on the calling client and the end-user groups, the permissions are added to the id and access tokens as a permissions claim, separated with a space. Now we will continue to update our stack and add the Pre-Token Generation trigger:
+
+```typescript
+// Define pre token generation lambda
+const preTokenGeneration = new NodejsFunction(this, "PreTokenGeneration", {
+  runtime: Runtime.NODEJS_20_X,
+  handler: "handler",
+  entry: `${__dirname}/handlers/pre-token-generation.ts`,
+  memorySize: MEMORY_SIZE,
+});
+
+preTokenGeneration.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["ssm:GetParameter"],
+    resources: [
+      Stack.of(this).formatArn({
+        service: "ssm",
+        resource: "parameter/permissions/userpool/id",
+      }),
+    ],
+  }),
+);
+
+preTokenGeneration.addToRolePolicy(
+  new PolicyStatement({
+    actions: ["cognito-idp:DescribeUserPoolClient"],
+    resources: ["*"],
+  })
+);
+
+userPool.addTrigger(
+  UserPoolOperation.PRE_TOKEN_GENERATION,
+  preTokenGeneration
+); // Needs to be changed to V2_0 in console until CDK supports it
+```

@@ -84,7 +84,7 @@ const resourceServer = userPool.addResourceServer("ResourceServer", {
 });
 ```
 
-Next, we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
+Next, we will define the Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
 
 ```typescript
 export const handler = async (event: PreTokenGenerationTriggerHandler) => {
