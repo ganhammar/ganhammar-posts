@@ -23,10 +23,10 @@ Based on this, this is how we will structure our permissions for this solution:
 
 | Client | Role | Permissions |
 |-------|-------|-------|
-| BookingFrontClient | Admin | booking:read, booking:write, booking:delete |
-| BookingFrontClient | User | booking:read |
-| BookingServiceClient | Admin | review:read, review:write, review:delete |
-| BookingServiceClient | User | review:read |
+| BookingClient | Admin | booking:read, booking:write, booking:delete |
+| BookingClient | User | booking:read |
+| ReviewClient | Admin | review:read, review:write, review:delete |
+| ReviewClient | User | review:read |
 
 # Implementation
 
@@ -168,7 +168,7 @@ const preTokenGeneration = new NodejsFunction(this, "PreTokenGeneration", {
   runtime: Runtime.NODEJS_20_X,
   handler: "handler",
   entry: `${__dirname}/handlers/pre-token-generation.ts`,
-  memorySize: MEMORY_SIZE,
+  memorySize: 1769,
 });
 
 preTokenGeneration.addToRolePolicy(
@@ -195,3 +195,139 @@ userPool.addTrigger(
   preTokenGeneration
 ); // Needs to be changed to V2_0 in console until CDK supports it
 ```
+
+That's it, we have now added the resources required for our fine-grained authorization solution, the next steps are to add our clients to test the solution with. We will add two clients, "BookingClient" and "ReviewClient".
+
+```typescript
+// Create booking client
+const bookingClient = new UserPoolClient(this, "BookingClient", {
+  userPool,
+  generateSecret: false,
+  userPoolClientName: "booking",
+  authFlows: {
+    userPassword: false,
+    userSrp: true,
+    custom: false,
+    adminUserPassword: false,
+  },
+  oAuth: {
+    flows: {
+      authorizationCodeGrant: true,
+    },
+    scopes: [
+      OAuthScope.EMAIL,
+      OAuthScope.OPENID,
+      OAuthScope.PROFILE,
+      OAuthScope.custom(
+        `${resourceServer.userPoolResourceServerId}/booking-service`
+      ),
+    ],
+    callbackUrls: ["http://localhost:3000"],
+    logoutUrls: ["http://localhost:3000"],
+  },
+});
+
+// Create review client
+const reviewClient = new UserPoolClient(this, "ReviewClient", {
+  userPool,
+  generateSecret: false,
+  userPoolClientName: "review",
+  authFlows: {
+    userPassword: false,
+    userSrp: true,
+    custom: false,
+    adminUserPassword: false,
+  },
+  oAuth: {
+    flows: {
+      authorizationCodeGrant: true,
+    },
+    scopes: [
+      OAuthScope.EMAIL,
+      OAuthScope.OPENID,
+      OAuthScope.PROFILE,
+      OAuthScope.custom(
+        `${resourceServer.userPoolResourceServerId}/review-service`
+      ),
+    ],
+    callbackUrls: ["http://localhost:3000"],
+    logoutUrls: ["http://localhost:3000"],
+  },
+});
+```
+
+We will also add a get-booking Lambda handler, which we will use as a proof-of-concept to verify that the permissions is present and can be used to determine wether or not the user is authorized to read bookings. We'll add the handler, `get-booking.ts`, in the `handlers`-folder that we created before.
+
+```typescript
+import { APIGatewayProxyEvent } from "aws-lambda";
+
+export const handler = async (event: APIGatewayProxyEvent) => {
+  const claims = event.requestContext.authorizer?.claims;
+
+  // Verify that the permissions is set and that the permissions contain booking:read
+  if (!Boolean(claims?.permissions) || !claims.permissions.includes("booking:read")) {
+    return {
+      statusCode: 403,
+      body: JSON.stringify({
+        message: "Forbidden",
+      }),
+    };
+  }
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({
+      id: "456",
+      date: new Date().toISOString(),
+      name: "Hotel California",
+    }),
+  };
+};
+
+```
+
+And add the handler to the stack with an API Gateway and Cognito authorizer infront:
+
+```typescript
+// Crate REST API
+const api = new RestApi(this, "PermissionsApi", {
+  restApiName: "permissions-api",
+});
+
+// Create Booking Lambda
+const getBookingLambda = new NodejsFunction(this, "GetBooking", {
+  runtime: Runtime.NODEJS_20_X,
+  handler: "handler",
+  entry: `${__dirname}/handlers/get-booking.ts`,
+  memorySize: MEMORY_SIZE,
+});
+const getBookingIntegration = new LambdaIntegration(getBookingLambda);
+
+// Create Cognito authorizer
+const authorizer = new CfnAuthorizer(this, "CognitoAuthorizer", {
+  restApiId: api.restApiId,
+  type: "COGNITO_USER_POOLS",
+  identitySource: "method.request.header.Authorization",
+  providerArns: [userPool.userPoolArn],
+  name: "CognitoAuthorizer",
+});
+
+// Add booking resource
+const bookingResource = api.root.addResource("booking");
+bookingResource.addMethod("GET", getBookingIntegration, {
+  authorizationType: AuthorizationType.COGNITO,
+  authorizer: {
+    authorizerId: authorizer.ref,
+  },
+  authorizationScopes: [
+    `${resourceServer.userPoolResourceServerId}/booking-service`,
+  ],
+});
+bookingResource.addCorsPreflight({
+  allowOrigins: ["http://localhost:3000"],
+  allowMethods: ["GET", "OPTIONS", "POST", "PUT", "DELETE"],
+  allowHeaders: ["*"],
+});
+```
+
+That's it, now we have all the resources required to also test the concept, let's deploy them and test it out!
