@@ -1,0 +1,14 @@
+---
+title: Fine Grained Permissions with Amazon Cognito
+id: fine-grained-permissions-with-cognito
+date: 2023-12-27
+status: draft
+---
+
+# Fine Grained Permissions with Amazon Cognito
+
+[As of a week ago](https://aws.amazon.com/about-aws/whats-new/2023/12/amazon-cognito-user-pools-customize-access-tokens/), you can now modify the contents of the access token, making it possible to add fine grained authorization decisions to your application that is leveraging Amazon Cognito for user authentication. Previously it has only been possible to modify the contents of the id token, which should soly be used to authenticate the user, not to authorize operations. This is what the access token is for. Modifying the properties of the access token requires that the User Pool is configured to enforce Advanced Security.
+
+## Amazon Cognito Lambda Triggers
+
+Amazon Cognito has support for different Lambda triggers that can be used to customize the behavior of a user pool at various points in the authentication and authorization process. In [my previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito), I explained how some of these triggers can be used to implement the delegation (or on-behalf-of) flow using Amazon Cognito, one of the triggers used in that solution is the "Pre Token Generation" trigger. This trigger can be used to add or remove properties of the id and access token.
