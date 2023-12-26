@@ -6,29 +6,29 @@ date: 2023-12-23
 
 # Delegation Tokens with Amazon Cognito
 
-The Delegation or On-Behalf-Of (OBO) flow is used when a service, often an API, needs to perform an action, often calling another API, on behalf of the end-user. This to ensure that the end-user has the permissions required to perform the action in the target service. The flow is not a part of the original OAuth 2.0 specification (RFC 6749), it is an extension introduced by Microsoft.
+The Delegation or On-Behalf-Of (OBO) flow is used when a service, often an API, needs to perform an action, often calling another API, on behalf of the end-user. This is to ensure that the end user has the permissions required to perform the action in the target service. The flow is not a part of the original OAuth 2.0 specification (RFC 6749), it is an extension introduced by Microsoft.
 
 How the flow works:
 
-1. The client (an application that interacts with the end-user, e.g a web or mobile application) autenticates the end-user and obtains an access token from the authorization server.
+1. The client (an application that interacts with the end-user, e.g. a web or mobile application) authenticates the end-user and obtains an access token from the authorization server.
 2. The client calls the initial API, API A, passing along the access token.
 3. The access token is only scoped to be able to call API A, therefore the API needs to request a new access token which is scoped to call the second API, API B. To ensure that the end-user also has the correct permissions to call API B, it passes along the original access token.
-4. The authorization server validates the incoming token and the clients credentials, and issues a new access token.
-5. API A uses this new access token to call API B, which is then scoped to be able to access API B and based on the end-users permissions.
+4. The authorization server validates the incoming token and the client's credentials and issues a new access token.
+5. API A uses this new access token to call API B, which is then scoped to be able to access API B based on the end-user's permissions.
 
 # Implementation, the Cognito Way 
 
-Amazon Cognito does not support this flow out-of-the box, however, they do support custom authentication flows, which we can use for our solution. Custom authentication flows are defined using AWS Lambda triggers. These triggers can be used to add custom validation, challenges for the user, such as additional authentication factors, or even to integrate with external systems.
+Amazon Cognito does not support this flow out of the box; however, they do support custom authentication flows, which we can use for our solution. Custom authentication flows are defined using AWS Lambda triggers. These triggers can be used to add custom validation, challenges for the user, such as additional authentication factors, or even to integrate with external systems.
 
 The triggers are:
 
 1. **Define Auth Challenge** which is used to determine the next challenge in a custom auth flow, such as asking the user for additional information, or calling an external system.
-2. **Create Auth Challenge** which is used to create a custom auth challenge for the end-user, based on the session information and the challenge name. Such as emailing a one-time password, which is also passed down stream to Cognito.
-3. **Verify Auth Challenge** which is used to determine if the response is correct. In the one-time password example, it verifies that the answer from the end-user matches what was passed down stream.
+2. **Create Auth Challenge** which is used to create a custom auth challenge for the end-user, based on the session information and the challenge name, such as emailing a one-time password, which is also passed downstream to Cognito.
+3. **Verify Auth Challenge** which is used to determine if the response is correct. In the one-time password example, it verifies that the answer from the end-user matches what was passed downstream.
 
 We can use this custom authentication flow to implement the delegation flow. We utilize the Define Auth Challenge lambda to return a DELEGATION challenge for the end-user and the Verify Auth Challenge lambda to verify that the answer contains a valid JWT.
 
-The problem with the custom auth flow is that we cannot request any scope(s) with the token request, but it is possible to pass client metadata with the request. We can use this parameter together with the Cognito trigger "Pre Token Generation", which can be used to add or remove claims and scopes, to add the necissary scopes required in order to call API B. As of a week ago, we can use this trigger to also modify the access token properties (which requires Cognito Advanced Security).
+The problem with the custom auth flow is that we cannot request any scope(s) with the token request, but it is possible to pass client metadata with the request. We can use this parameter together with the Cognito trigger "Pre Token Generation", which can be used to add or remove claims and scopes, to add the necessary scopes required to call API B. As of a week ago, we can use this trigger to modify the access token properties (which require Cognito Advanced Security).
 
 ## Defining the Stack
 
@@ -83,7 +83,7 @@ const resourceServer = userPool.addResourceServer("ResourceServer", {
 });
 ```
 
-Next we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 has not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
+Next, we will define Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
 
 ```typescript
 export const handler = async (event: PreTokenGenerationTriggerHandler) => {
@@ -172,7 +172,7 @@ userPool.addTrigger(
 ); // Needs to be changed to V2_0 in console until CDK supports it
 ```
 
-Next we will define the Define Auth Challenge Lambda in the same folder as our other handler:
+Next, we will define the Define Auth Challenge Lambda in the same folder as our other handler:
 
 ```typescript
 import { Callback, Context, DefineAuthChallengeTriggerEvent } from "aws-lambda";
@@ -225,7 +225,7 @@ userPool.addTrigger(
 );
 ```
 
-Lastly we will create the Verify Auth Challenge Response Lambda. This Lambda needs to verify the end-users Access Token, which there is loads of examples of out there. The source code for how I did it in the example below can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/utils/verify-token.ts).
+Lastly, we will create the Verify Auth Challenge Response Lambda. This Lambda needs to verify the end-user's Access Token, which there are loads of examples of out there. The source code for how I did it in the example below can be found [here](https://github.com/ganhammar/delegation-with-amazon-cognito/blob/main/lib/handlers/utils/verify-token.ts).
 
 ```typescript
 import { Callback, Context, VerifyAuthChallengeResponseTriggerEvent } from "aws-lambda";
@@ -292,3 +292,128 @@ userPool.addTrigger(
   verifyAuthChallengeResponse
 );
 ```
+
+That's it, we have now added the resources required for our custom auth flow, the next steps are to add our clients to test the solution with. The first client, "BookingFrontClient" is the front-end client, used by the end user to authenticate, the second client, "BookingServiceClient", is used by the booking service to get a token that can communicate with the review service.
+
+```typescript
+// Create booking frontend client
+const bookingFrontClient = new UserPoolClient(this, "BookingFrontClient", {
+  userPool,
+  generateSecret: false,
+  userPoolClientName: "booking-front",
+  authFlows: {
+    userPassword: false,
+    userSrp: true,
+    custom: false,
+    adminUserPassword: false,
+  },
+  oAuth: {
+    flows: {
+      authorizationCodeGrant: true,
+    },
+    scopes: [
+      OAuthScope.EMAIL,
+      OAuthScope.OPENID,
+      OAuthScope.PROFILE,
+      OAuthScope.custom(
+        `${resourceServer.userPoolResourceServerId}/booking-service`
+      ),
+    ],
+    callbackUrls: ["http://localhost:3000"],
+    logoutUrls: ["http://localhost:3000"],
+  },
+});
+
+// Create booking service client
+const bookingServiceClient = new UserPoolClient(
+  this,
+  "BookingServiceClient",
+  {
+    userPool,
+    generateSecret: true,
+    userPoolClientName: "booking-service",
+    oAuth: {
+      flows: {
+        clientCredentials: true,
+      },
+      scopes: [
+        OAuthScope.custom(
+          `${resourceServer.userPoolResourceServerId}/review-service`
+        ),
+      ],
+    },
+  }
+);
+```
+
+## Testing the Solution
+
+To test the delegation flow we need to first authenticate using the "BookingFrontClient", this can be done through any API client such as Insomnia or Postman, or you could use the simple client defined in the [companion repository](https://github.com/ganhammar/delegation-with-amazon-cognito/tree/main/src/client) of this post. In order to have any user to login with, you would also need to register a user, this can be done through the AWS Console.
+
+Once you have an access token that is authenticated using the "BookingFrontClient" it is time to initiate the custom auth. In order to do this, you first need to have the client secret of the "BookingServiceClient" using a combination of the client id and the end user username:
+
+```typescript
+import { createHmac } from "crypto";
+
+export function getSecretHash(
+  clientId: string,
+  clientSecret: string,
+  username: string
+): string {
+  const message = `${username}${clientId}`;
+  return createHmac("SHA256", clientSecret).update(message).digest("base64");
+}
+```
+
+To test the above script, you could write a simple script that import the `getSecretHash`-function and calls it using arguments passed when invoking the wrapping script:
+
+```typescript
+import { getSecretHash } from "./path/to/get-secret-hash";
+
+const [clientId, clientSecret, username] = process.argv.slice(2);
+
+console.log(getSecretHash(clientId, clientSecret, username));
+```
+
+Running this script will give you the secret hash required to initiate the custom auth. Run the following curl command to initiate the auth and get a session id, which is required to respond to the challenge:
+
+```sh
+curl -X POST \
+  -H "Content-Type: application/x-amz-json-1.1" \
+  -H "X-Amz-Target: AWSCognitoIdentityProviderService.InitiateAuth" \
+  -d '{
+    "AuthFlow": "CUSTOM_AUTH",
+    "ClientId": "<clientId>",
+    "AuthParameters": {
+      "USERNAME": "<username>",
+      "SECRET_HASH": "<secretHash>"
+    }
+  }' \
+  "<cognitoUrl>"
+```
+
+To respond to the auth challenge, the below curl command can be run. Replace the scope parameter with the scope required to call the second API (API B), in this case, `resources/review-service`. The ANSWER should be the end-user's JWT, required through the "BookingFrontClient". The Session-parameter is received when initiating the auth. The rest of the parameters should be the same as during initiation.
+
+```sh
+curl -X POST \
+  -H "Content-Type: application/x-amz-json-1.1" \
+  -H "X-Amz-Target: AWSCognitoIdentityProviderService.RespondToAuthChallenge" \
+  -d '{
+    "ChallengeName": "CUSTOM_CHALLENGE",
+    "ClientId": "<clientId>",
+    "Session": "<initiateAuthData.Session>",
+    "ChallengeResponses": {
+      "USERNAME": "<username>",
+      "ANSWER": "<accessToken>",
+      "SECRET_HASH": "<secretHash>"
+    },
+    "ClientMetadata": {
+      "scope": "<scope>"
+    }
+  }' \
+  "<cognitoUrl>"
+```
+
+And that is it, now you have an access token that can be used to call API B, the review service, which is based on the end-user's credentials but with the required scopes. A complete example with a Rest API and a test frontend client can be found in the companion repository [here](https://github.com/ganhammar/delegation-with-amazon-cognito).
+
+The next step for this solution would be to add fine grained permissions for the end user, based on the requesting client, to keep the access token relatively light weight. This can be done through the Pre Token Generation trigger and a custom permissions store.
