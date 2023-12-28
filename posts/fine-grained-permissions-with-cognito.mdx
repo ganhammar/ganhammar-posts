@@ -2,7 +2,7 @@
 title: Fine-Grained Authorization with Amazon Cognito
 id: fine-grained-authorization-with-amazon-cognito
 date: 2023-12-27
-status: draft
+status: published
 ---
 
 # Fine-Grained Authorization with Amazon Cognito
@@ -127,23 +127,25 @@ export const handler = async (
   const claims = event.request.userAttributes;
   const groups = event.request.groupConfiguration.groupsToOverride;
 
-  const command = new BatchGetItemCommand({
-    RequestItems: {
-      [tableName]: {
-        Keys: groups.map((group) => ({
-          pk: { S: event.callerContext.clientId },
-          sk: { S: group },
-        })),
+  if ((groups?.length ?? 0) > 0) {
+    const command = new BatchGetItemCommand({
+      RequestItems: {
+        [tableName]: {
+          Keys: groups.map((group) => ({
+            pk: { S: event.callerContext.clientId },
+            sk: { S: group },
+          })),
+        },
       },
-    },
-  });
-  const data = await client.send(command);
+    });
+    const data = await client.send(command);
 
-  const permissions = [...new Set(data.Responses![tableName].map(
-    (item) => item.permissions.SS ?? []
-  ).flat())];
+    const permissions = [...new Set(data.Responses![tableName].map(
+      (item) => item.permissions.SS ?? []
+    ).flat())];
 
-  claims["permissions"] = permissions.join(",");
+    claims["permissions"] = permissions.join(",");
+  }
 
   event.response = {
     claimsAndScopeOverrideDetails: {
@@ -169,6 +171,9 @@ const preTokenGeneration = new NodejsFunction(this, "PreTokenGeneration", {
   handler: "handler",
   entry: `${__dirname}/handlers/pre-token-generation.ts`,
   memorySize: 1769,
+  environment: {
+    TABLE_NAME: table.tableName,
+  },
 });
 
 preTokenGeneration.addToRolePolicy(
@@ -194,6 +199,9 @@ userPool.addTrigger(
   UserPoolOperation.PRE_TOKEN_GENERATION,
   preTokenGeneration
 ); // Needs to be changed to V2_0 in console until CDK supports it
+
+// Grant read access to table
+table.grantReadData(preTokenGeneration);
 ```
 
 That's it, we have now added the resources required for our fine-grained authorization solution, the next steps are to add our clients to test the solution with. We will add two clients, "BookingClient" and "ReviewClient".
@@ -203,7 +211,7 @@ That's it, we have now added the resources required for our fine-grained authori
 const bookingClient = new UserPoolClient(this, "BookingClient", {
   userPool,
   generateSecret: false,
-  userPoolClientName: "booking",
+  userPoolClientName: "Booking",
   authFlows: {
     userPassword: false,
     userSrp: true,
@@ -231,7 +239,7 @@ const bookingClient = new UserPoolClient(this, "BookingClient", {
 const reviewClient = new UserPoolClient(this, "ReviewClient", {
   userPool,
   generateSecret: false,
-  userPoolClientName: "review",
+  userPoolClientName: "Review",
   authFlows: {
     userPassword: false,
     userSrp: true,
@@ -256,7 +264,7 @@ const reviewClient = new UserPoolClient(this, "ReviewClient", {
 });
 ```
 
-We will also add a get-booking Lambda handler, which we will use as a proof-of-concept to verify that the permissions is present and can be used to determine wether or not the user is authorized to read bookings. We'll add the handler, `get-booking.ts`, in the `handlers`-folder that we created before.
+We will also add a get-booking Lambda handler, which we will use as a proof-of-concept to verify that the permissions is present and can be used to determine whether or not the user is authorized to read bookings. We'll add the handler, `get-booking.ts`, in the `handlers`-folder that we created before.
 
 ```typescript
 import { APIGatewayProxyEvent } from "aws-lambda";
@@ -331,3 +339,65 @@ bookingResource.addCorsPreflight({
 ```
 
 That's it, now we have all the resources required to also test the concept, let's deploy them and test it out!
+
+## Testing the Solution
+
+To test the fine-grained authorization we need first to create a user that can login to the user pool and add the user to one of the two groups, "User" or "Admin", this can be done through the AWS Console or the AWS CLI:
+
+```sh
+aws cognito-idp admin-create-user \
+  --user-pool-id <USER_POOL_ID> \
+  --username <USERNAME> \
+  --user-attributes Name=email,Value=<EMAIL> Name=email_verified,Value=true \
+  --temporary-password <TEMPORARY_PASSWORD> \
+  --message-action SUPPRESS
+```
+
+We also need to populate the Permissions-table, this can be done with AWS CLI by running `aws dynamodb batch-write-item --request-items file://sample-data.json` where "sample-data.json" contains the following (make sure to replace the client id's):
+
+```json
+{
+  "Permissions": [
+    {
+      "PutRequest": {
+        "Item": {
+          "pk": { "S": "<BOOKING_CLIENT_ID>" },
+          "sk": { "S": "Admin" },
+          "permissions": { "SS": ["booking:write", "booking:read", "booking:delete"] }
+        }
+      }
+    },
+    {
+      "PutRequest": {
+        "Item": {
+          "pk": { "S": "<BOOKING_CLIENT_ID>" },
+          "sk": { "S": "User" },
+          "permissions": { "SS": ["booking:read"] }
+        }
+      }
+    },
+    {
+      "PutRequest": {
+        "Item": {
+          "pk": { "S": "<REVIEW_CLIENT_ID>" },
+          "sk": { "S": "Admin" },
+          "permissions": { "SS": ["review:write", "review:read", "review:delete"] }
+        }
+      }
+    },
+    {
+      "PutRequest": {
+        "Item": {
+          "pk": { "S": "<REVIEW_CLIENT_ID>" },
+          "sk": { "S": "User" },
+          "permissions": { "SS": ["review:read"] }
+        }
+      }
+    }
+  ]
+}
+```
+
+Now it is time to authenticate using the "BookingClient" and call the API using the end-user credentials. This can be done through any API client such as Insomnia or Postman, or you could use the simple client defined in the [companion repository](https://github.com/ganhammar/fine-grained-authorization-with-amazon-cognito/tree/main/src/client) of this post. Then you can call the booking endpoint to verify that you have permission to call it, also try to remove yourself from the groups that give the permissions and call the API again to see that you no longer have access to call it.
+
+I recommend that you combine this fine-grained authorization method with the delegation (or on-behalf-of) flow mentioned in my [previous post](https://www.ganhammar.se/posts/delegation-tokens-with-cognito) when you need to perform machine-to-machine calls, this to ensure that the permissions are updated between the requests, based on the Cognito client.
