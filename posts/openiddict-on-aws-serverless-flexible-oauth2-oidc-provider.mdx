@@ -1,0 +1,40 @@
+---
+title: "OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider"
+id: openiddict-on-aws-serverless-flexible-oauth2-oidc-provider
+date: 2024-04-01
+status: draft
+---
+
+# OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider
+
+OpenIddict is a flexible OAuth2 and OpenID Connect server for ASP.NET Core. It's a great choice for building your own OAuth2/OIDC provider. In this post, we'll show you how to deploy OpenIddict on AWS Serverless using AWS Lambda, API Gateway, DynamoDB, and Systems Manager Parameter Store. We will focus on the OAuth2 Client Credentials flow for simplicity, but you can easily extend it to support other flows.
+
+## Why not Amazon Cognito?
+
+Amazon Cognito is a managed service that provides user authentication and authorization for your applications. It supports OAuth2 and OpenID Connect out of the box, so why not use it instead of OpenIddict? Here are a few reasons:
+
+1. **Customization**: Amazon Cognito provides a set of predefined features and configurations. If you need more flexibility or customization, you may find it limiting, especially when it comes to the hosted UI.
+2. **Geo-Location**: Amazon Cognito is a regional service, which means it's limited to the region where it's deployed. If you need to support multiple regions, you'll have to deploy multiple instances of Amazon Cognito, which can be complex and costly, especially if you have a global user base.
+3. **Cost**: Amazon Cognito has a free tier, but, additional costs will incur as your user base grows, especially if you have a need to customize the access token, using the pre-token-generation Lambda, since it requires Advanced Security to be enabled on the user pool.
+4. **Disaster Recovery**: Amazon Cognito doesn't provide a built-in disaster recovery solution. You'll have to implement your own backup and restore strategy, which can be complex and error-prone. For instance, the user sub (subject) is unique per user pool, so if you lose the user pool, you'll lose the user sub, which can be a problem if you're referencing it in your application(s).
+
+## Architecture
+
+The architecture of our solution is rather simple and straightforward. We'll use AWS Lambda to host our OpenIddict server, which will be a Lambdalith (Lambda Monolith) function, API Gateway to expose the proxy endpoint, DynamoDB to store the configuration, mainly client configuration in this example, and Systems Manager Parameter Store to store keys for data protection and the OpenIddict certificates used for signing and encryption.
+
+# Implementation
+
+We'll start with an empty project, let's start with defining the startup (`Startup.cs`), here's the base:
+
+```csharp
+public class Startup(IConfiguration configuration, IHostEnvironment environment)
+{
+  public void ConfigureServices(IServiceCollection services)
+  {
+  }
+
+  public void Configure(IApplicationBuilder app)
+  {
+  }
+}
+```
