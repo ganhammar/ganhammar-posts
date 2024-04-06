@@ -152,7 +152,8 @@ public static class AsyncEnumerableExtensions
 }
 ```
 
-Finally we need to ensure that the database is seeded and that there is client for us to test with. In a production scenario, the below code would be moved to a seed script that is run a part of ci/cd. Let's add below just before `app.Run()`:
+Finally we need to ensure that the database is seeded and that there is client for us to test with. In a production scenario, the below code would be moved to a seed script that is run a part of ci/cd.  
+We'll use the `OpenIddictApplicationManager` to check if the demo client exists, if not, we'll use the same instance to create it. Let's add the script just before `app.Run()`:
 
 ```csharp
 OpenIddictDynamoDbSetup.EnsureInitialized(app.Services);
@@ -233,4 +234,136 @@ The certificates can be generated using `System.Security.Cryptography`, I will n
 
 ## Defining the stack
 
-For this project we will use AWS SAM to define our stack 
+For this project we will use AWS SAM to define our stack. The stack contains an instance of an API Gateway HTTP API and a Lambda function, running our OpenIddict instance, with all requests to the API Gateway proxied to it. The Lambda function needs access to the DynamoDB table, created out side of the stack, and Systems Manager, to read the certificates, and to write and update DataProtection keys. We also need to add some policies for the seed script that should not be needed once the seed script is moved out of project startup.
+
+The Lambda function will be built using a makefile, which needs to be put in the root of OpenIddict project:
+
+```makefile
+build-OpenIddictFunction:
+	dotnet publish -c Release ./OpenIddictServerlessDemo.csproj -o $(ARTIFACTS_DIR)
+```
+
+And this is the AWS SAM template for our stack:
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: OpenIddit Serverless Demo
+
+Globals:
+  Function:
+    MemorySize: 1769
+    Architectures:
+      - arm64
+    Runtime: dotnet8
+    Timeout: 30
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: openiddict-serverless-demo.openiddict
+        ASPNETCORE_ENVIRONMENT: Production
+
+Resources:
+  OpenIddictApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins:
+          - "http://localhost:8001"
+        AllowHeaders: "*"
+        AllowMethods: "*"
+        AllowCredentials: true
+  OpenIddictFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./src/OpenIddictServerlessDemo
+      Handler: OpenIddictServerlessDemo::OpenIddictServerlessDemo.LambdaEntryPoint::FunctionHandlerAsync
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OpenIddictApi
+            Path: /{proxy+}
+            Method: ANY
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName:
+              Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/openiddict-serverless-demo.openiddict
+        - Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParametersByPath
+            Resource: 
+              - Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/OpenIddictServerlessDemo/Certificates
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:GetParameter
+              - ssm:DescribeParameters
+              - ssm:GetParametersByPath
+            Resource: 
+              - Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/OpenIddictServerlessDemo/DataProtection/
+          - Effect: Allow
+            Action:
+              - dynamodb:Query
+            Resource:
+              - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/openiddict-serverless-demo.openiddict/index/*
+          # Needed for setup script, should not be run during startup in production
+          - Effect: Allow
+            Action:
+              - dynamodb:ListTables
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeTimeToLive
+            Resource:
+              - Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/openiddict-serverless-demo.openiddict
+    Metadata:
+      BuildMethod: makefile
+```
+
+## Adding GitHub pipelines
+
+Finally we'll add a GitHub pipeline which will be used to build and deploy our project. It uses [OpenID Connnect to authenticate against AWS](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services). We'll add the pipeline in the file `.github/workflows/main.yml` with the following definition:
+
+```yml
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: eu-north-1
+
+permissions:
+  id-token: write
+  contents: read
+  packages: read
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET Core SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: aws-actions/setup-sam@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-north-1
+          role-to-assume: ${{ vars.DEPLOY_ROLE }}
+          role-session-name: OIDCSession
+      - run: sam build
+      - run: sam deploy --no-fail-on-empty-changeset --stack-name openiddict-serverless-demo --resolve-s3 --capabilities CAPABILITY_IAM
+```
+
+# Wrapping Up
+
+And that is it, now you should have a deployed instance of OpenIddict that is utilizing a completly serverless-stack which can easily be extended with more OAuth2/OIDC flows. It could also easily be scaled out to more regions with [DynamoDB global tables](https://aws.amazon.com/dynamodb/global-tables/).
+
+The companion repository for this post can be found [here](https://github.com/ganhammar/openiddict-serverless-demo).
