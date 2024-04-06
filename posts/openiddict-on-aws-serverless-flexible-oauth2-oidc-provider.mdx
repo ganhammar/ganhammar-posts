@@ -194,3 +194,43 @@ curl http://localhost:{PROJECT_PORT}/connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials&client_id=openiddict-serverless-demo&client_secret={SOME_SECRET_STRING}"
 ```
+# Deploying to AWS
+
+Next we will create the GitHub pipeline that will deploy the project to AWS, but, before we do that, we must add signing and encryption certificates for production use. The certificates will be stored as secure strings in AWS Systems Manager Parameter Store. To use them in our application, we will add Systems Manager as a configuration source:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddSystemsManager("/OpenIddictServerlessDemo/Certificates"); // Add this
+
+var services = builder.Services;
+// ...
+```
+
+Then we will add an `else`-statement connected to the `environment.IsDevelopment()`-check:
+
+```csharp
+if (environment.IsDevelopment())
+{
+  // ...
+}
+else
+{
+  var signingCertificate = configuration.GetValue<string>("SigningCertificate");
+  var encryptionCertificate = configuration.GetValue<string>("EncryptionCertificate");
+
+  if (string.IsNullOrEmpty(signingCertificate) || string.IsNullOrEmpty(encryptionCertificate))
+  {
+    throw new InvalidOperationException("SigningCertificate and EncryptionCertificate must be set in the configuration.");
+  }
+
+  builder
+    .AddSigningCertificate(new X509Certificate2(Convert.FromBase64String(signingCertificate)))
+    .AddEncryptionCertificate(new X509Certificate2(Convert.FromBase64String(encryptionCertificate)));
+}
+```
+
+The certificates can be generated using `System.Security.Cryptography`, I will not go into to much details about how it is done here, but, there is a[ helper project](https://github.com/ganhammar/openiddict-serverless-demo/tree/main/src/GenerateCertificates) in the [companion repository](https://github.com/ganhammar/openiddict-serverless-demo) that can be used to generate them. Then create the secured strings using the AWS Console following naming convention above (`/OpenIddictServerlessDemo/Certificates/(SigningCertificate|EncryptionCertificate)`).
+
+## Defining the stack
+
+For this project we will use AWS SAM to define our stack 
