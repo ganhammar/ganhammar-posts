@@ -24,17 +24,173 @@ The architecture of our solution is rather simple and straightforward. We'll use
 
 # Implementation
 
-We'll start with an empty project, let's start with defining the startup (`Startup.cs`), here's the base:
+Let's start from an empty web project, run `dotnet new web` in the target folder and add the dependencies that we'll use for the project:
+
+```sh
+dotnet add package Amazon.AspNetCore.DataProtection.SSM
+dotnet add package Amazon.Extensions.Configuration.SystemsManager
+dotnet add package Amazon.Lambda.AspNetCoreServer.Hosting
+dotnet add package AWSSDK.DynamoDBv2
+dotnet add package Community.OpenIddict.AmazonDynamoDB
+dotnet add package OpenIddict.AspNetCore
+```
+
+Great, let's start by adding AWS Lambda hosting and configuring DynamoDB:
 
 ```csharp
-public class Startup(IConfiguration configuration, IHostEnvironment environment)
-{
-  public void ConfigureServices(IServiceCollection services)
+var builder = WebApplication.CreateBuilder(args);
+
+var services = builder.Services;
+var configuration = builder.Configuration;
+var environment = builder.Environment;
+
+services.AddAWSLambdaHosting(LambdaEventSource.HttpApi);
+services
+  .AddDefaultAWSOptions(configuration.GetAWSOptions())
+  .AddSingleton<IAmazonDynamoDB>(new AmazonDynamoDBClient());
+```
+
+Next we'll configure AspNetCore DataProtection, which is used to encrypt and decrypt data, including authentication tokens. To ensure the ability to decrypt tokens even after the environment is reinitialized, it's crucial to store the keys externally, rather than in the project's file system. For this purpose, we'll utilize AWS Systems Manager Parameter Store:
+
+```csharp
+services
+  .AddDataProtection()
+  .PersistKeysToAWSSystemsManager("/OpenIddictServerlessDemo/DataProtection");
+```
+
+It's time to configure OpenIddict, we're going to use DynamoDB to persist OpenIddict data, which is where the package `Community.OpenIddict.AmazonDynamoDB` comes in. We will only enable client credentials for this project:
+
+```csharp
+services
+  .AddOpenIddict()
+  .AddCore(builder =>
   {
+    builder
+      .UseDynamoDb()
+      .SetDefaultTableName("openiddict-serverless-demo.openiddict");
+  })
+  .AddServer(builder =>
+  {
+    builder.SetTokenEndpointUris("/connect/token");
+    builder.AllowClientCredentialsFlow();
+
+    var aspNetCoreBuilder = builder
+      .UseAspNetCore()
+      .EnableTokenEndpointPassthrough();
+
+    if (environment.IsDevelopment())
+    {
+      builder.AddEphemeralEncryptionKey();
+      builder.AddEphemeralSigningKey();
+      aspNetCoreBuilder.DisableTransportSecurityRequirement();
+    }
+  });
+```
+
+At this point, we should be able to run the project and access the OpenID discovery document by going to `http://localhost:{PROJECT_PORT}/.well-known/openid-configuration`. The server should return a JSON document with the details about your OpenID server.
+
+
+It's time to configure the token endpoint:
+
+```csharp
+app.MapPost("/connect/token", async (
+  HttpContext httpContext,
+  IOpenIddictApplicationManager applicationManager,
+  IOpenIddictScopeManager scopeManager) =>
+{
+  var openIddictRequest = httpContext.GetOpenIddictServerRequest()!;
+  var application = await applicationManager.FindByClientIdAsync(openIddictRequest.ClientId!);
+
+  if (application == default)
+  {
+    return Results.BadRequest(new OpenIddictResponse
+    {
+      Error = Errors.InvalidClient,
+      ErrorDescription = "The specified client identifier is invalid."
+    });
   }
 
-  public void Configure(IApplicationBuilder app)
+  var identity = new ClaimsIdentity(
+    TokenValidationParameters.DefaultAuthenticationType,
+    Claims.Name, Claims.Role);
+
+  identity.SetClaim(Claims.Subject, (await applicationManager.GetClientIdAsync(application))!);
+
+  var principal = new ClaimsPrincipal(identity);
+  principal.SetScopes(openIddictRequest.GetScopes());
+  principal.SetResources(await scopeManager.ListResourcesAsync(principal.GetScopes()).ToListAsync());
+
+  return Results.SignIn(principal, new(), OpenIddictServerAspNetCoreDefaults.AuthenticationScheme);
+});
+```
+
+The method `scopeManager.ListResourcesAsync` returns `IAsyncEnumerable`, to simplify the usage we'll create an extension method, `ToListAsync`, which can be used to convert the result to a list:
+
+```csharp
+namespace System.Collections.Generic;
+
+public static class AsyncEnumerableExtensions
+{
+  public static Task<List<T>> ToListAsync<T>(this IAsyncEnumerable<T> source)
   {
+    ArgumentNullException.ThrowIfNull(source);
+
+    return ExecuteAsync();
+
+    async Task<List<T>> ExecuteAsync()
+    {
+      var list = new List<T>();
+
+      await foreach (var element in source)
+      {
+        list.Add(element);
+      }
+
+      return list;
+    }
   }
 }
+```
+
+Finally we need to ensure that the database is seeded and that there is client for us to test with. In a production scenario, the below code would be moved to a seed script that is run a part of ci/cd. Let's add below just before `app.Run()`:
+
+```csharp
+OpenIddictDynamoDbSetup.EnsureInitialized(app.Services);
+using (var scope = app.Services.CreateScope())
+{
+  CreateDemoClient(scope.ServiceProvider).GetAwaiter().GetResult();
+}
+
+static async Task CreateDemoClient(IServiceProvider provider)
+{
+  var manager = provider.GetRequiredService<IOpenIddictApplicationManager>();
+  var clientId = "openiddict-serverless-demo";
+
+  var exists = await manager.FindByClientIdAsync(clientId);
+  if (exists != null)
+  {
+    return;
+  }
+
+  await manager.CreateAsync(new()
+  {
+    ClientId = clientId,
+    ClientSecret = "{SOME_SECRET_STRING}",
+    DisplayName = "Demo client application",
+    Permissions =
+    {
+      Permissions.Endpoints.Token,
+      Permissions.GrantTypes.ClientCredentials
+    }
+  });
+}
+```
+
+Let's run the project and request a token using `client_credentials`. For this we can use any HTTP client, such as Postman, Insomnia, Thunder Client, or plain cURL:
+
+```sh
+curl http://localhost:{PROJECT_PORT}/connect/token \
+  -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&client_id=openiddict-serverless-demo&client_secret={SOME_SECRET_STRING}"
 ```
