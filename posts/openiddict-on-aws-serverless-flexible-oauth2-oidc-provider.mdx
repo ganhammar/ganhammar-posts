@@ -1,8 +1,8 @@
 ---
 title: "OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider"
 id: openiddict-on-aws-serverless-flexible-oauth2-oidc-provider
-date: 2024-04-01
-status: draft
+date: 2024-04-07
+status: published
 ---
 
 # OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider
@@ -35,7 +35,7 @@ dotnet add package Community.OpenIddict.AmazonDynamoDB
 dotnet add package OpenIddict.AspNetCore
 ```
 
-Great, let's start by adding AWS Lambda hosting and configuring DynamoDB:
+Great, let's start by adding AWS Lambda hosting and configuring DynamoDB in `Program.cs`:
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
@@ -89,8 +89,7 @@ services
 
 At this point, we should be able to run the project and access the OpenID discovery document by going to `http://localhost:{PROJECT_PORT}/.well-known/openid-configuration`. The server should return a JSON document with the details about your OpenID server.
 
-
-It's time to configure the token endpoint:
+It's time to configure the token endpoint by adding a POST endpoint with a path that matches the path specified when adding OpenIddict to the project (`builder.SetTokenEndpointUris("/connect/token");`). The request has already been validated by OpenIddict, all we have to do is to create the claims principal that will be used to generate the token. Here we´re replacing the existing `MapGet` with:
 
 ```csharp
 app.MapPost("/connect/token", async (
@@ -124,7 +123,7 @@ app.MapPost("/connect/token", async (
 });
 ```
 
-The method `scopeManager.ListResourcesAsync` returns `IAsyncEnumerable`, to simplify the usage we'll create an extension method, `ToListAsync`, which can be used to convert the result to a list:
+The method `scopeManager.ListResourcesAsync` returns `IAsyncEnumerable`, to simplify the usage we'll create an extension method, `ToListAsync`, which can be used to convert the result to a list. Here we're adding a new file (`Extensions/AsyncEnumerableExtensions.cs`) with the follow extension method:
 
 ```csharp
 namespace System.Collections.Generic;
@@ -257,7 +256,6 @@ Globals:
       - arm64
     Runtime: dotnet8
     Timeout: 30
-    Tracing: Active
     Environment:
       Variables:
         TABLE_NAME: openiddict-serverless-demo.openiddict
@@ -266,19 +264,11 @@ Globals:
 Resources:
   OpenIddictApi:
     Type: AWS::Serverless::HttpApi
-    Properties:
-      StageName: $default
-      CorsConfiguration:
-        AllowOrigins:
-          - "http://localhost:8001"
-        AllowHeaders: "*"
-        AllowMethods: "*"
-        AllowCredentials: true
   OpenIddictFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ./src/OpenIddictServerlessDemo
-      Handler: OpenIddictServerlessDemo::OpenIddictServerlessDemo.LambdaEntryPoint::FunctionHandlerAsync
+      Handler: OpenIddictServerlessDemo
       Events:
         Api:
           Type: HttpApi
