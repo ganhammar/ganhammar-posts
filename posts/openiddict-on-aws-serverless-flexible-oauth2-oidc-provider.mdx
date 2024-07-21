@@ -231,7 +231,7 @@ else
 }
 ```
 
-The certificates can be generated using `System.Security.Cryptography`, I will not go into to much details about how it is done here, but, there is a[ helper project](https://github.com/ganhammar/openiddict-serverless-demo/tree/main/src/GenerateCertificates) in the [companion repository](https://github.com/ganhammar/openiddict-serverless-demo) that can be used to generate them. Then create the secured strings using the AWS Console following naming convention above (`/OpenIddictServerlessDemo/Certificates/(SigningCertificate|EncryptionCertificate)`).
+The certificates can be generated using `System.Security.Cryptography`, I will not go into to much details about how it is done here, but, there is a[ helper project](https://github.com/ganhammar/openiddict-serverless-demo/tree/post-1/src/GenerateCertificates) in the [companion repository](https://github.com/ganhammar/openiddict-serverless-demo/tree/post-1) that can be used to generate them. Then create the secured strings using the AWS Console following naming convention above (`/OpenIddictServerlessDemo/Certificates/(SigningCertificate|EncryptionCertificate)`).
 
 ## Defining the stack
 
@@ -352,4 +352,4 @@ jobs:
 
 And that is it, now you should have a deployed instance of OpenIddict that is utilizing a completly serverless-stack which can easily be extended with more OAuth2/OIDC flows. It could also easily be scaled out to more regions with [DynamoDB global tables](https://aws.amazon.com/dynamodb/global-tables/).
 
-The companion repository for this post can be found [here](https://github.com/ganhammar/openiddict-serverless-demo).
+The companion repository for this post can be found [here](https://github.com/ganhammar/openiddict-serverless-demo/tree/post-1).
