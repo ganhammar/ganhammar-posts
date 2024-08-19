@@ -1,0 +1,195 @@
+---
+title: Lambda@Edge Authorizer
+id: lambda-at-edge-authorizer
+date: 2023-08-19
+status: draft
+---
+
+# Using Lambda@Edge as Authorizer for Lambda Function URL
+
+With the [relatively new addition](https://aws.amazon.com/about-aws/whats-new/2024/04/amazon-cloudfront-oac-lambda-function-url-origins/) of Origin Access Control (OAC) for Lambda Function URLs origins, it is possible to connect a CloudFront distribution directly with a Lambda function, only allowing it to access the function. Removing the need of using API Gateways infront of the Lambda function, which will lower your overall costs.
+
+With API Gateway, you would typically use an authorizer to authorize a request before the Lambda is invoked, which there is no out-of-the-box support for with only CloudFront and Lambda Function URLs. In this post we will explore using a Lambda@Edge function as an authorizer, to mimic the same behaviour. The authorizer will look for an OIDC/OAuth 2.0 authorization token in the request header and validate it, using signing and encyption certificates stored in Systems Manager Parameter Store, this to try to keep the external dependencies to a minimum.
+
+# Building the Authorizer Function
+
+We will use Node as the runtime for the authorizer function (Lambda@Edge [support](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-at-edge-function-restrictions.html#lambda-at-edge-restrictions-runtime) Node and Python runtimes). And as the token issuer, we will use the OpenIddict server that we created in a previous post, [OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider](https://www.ganhammar.se/posts/openiddict-on-aws-serverless-flexible-oauth2-oidc-provider), with some [small modifications](https://github.com/ganhammar/openiddict-serverless-demo/commit/95fe95d9c0b940ba72d2e469dffea1b4e24f9c57), converting the certificates to PEM format. Which has better Node support, especially since we want to avoid using openssl binaries, since it is not included in the Lambda runtime.
+
+The Authorizer function will use `node-jose` to create the signing and encyption keys using the PEM-certificates and `jsonwebtoken` to validate the passed authorization token. We'll also need to install `aws-lambda` and `@aws-sdk/client-ssm`, for the request interface definition and to fetch the certificates from SSM.
+
+Let's start with simply allowing requests with an authorization header and denying without:
+
+```typescript
+import { CloudFrontRequestEvent } from 'aws-lambda';
+
+export const handler = async (event: CloudFrontRequestEvent) => {
+  const request = event.Records[0].cf.request;
+  const authHeader = request.headers['authorization']?.[0]?.value;
+
+  // Check if the user is authenticated
+  if (!authHeader) {
+    return respond('401', 'Unauthorized', 'User is not authenticated, no auth header present');
+  }
+
+  // Allow the request to proceed to the origin
+  return request;
+};
+
+function respond(status: string, statusDescription: string, body: string) {
+  return {
+    status,
+    statusDescription,
+    headers: {
+      'content-type': [{ key: 'Content-Type', value: 'text/html' }],
+    },
+    body,
+  };
+}
+```
+
+The `respond`-function will be reused once we extend our function handler with actually validating the token. The next step will be to extend our handler with the logic that fetches the certificates from Systems Manager Parameter Store:
+
+```typescript
+import { SSMClient, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
+
+const ssmClient = new SSMClient({ region: 'eu-north-1' });
+
+interface CertificateParts {
+  certificate: string;
+  key: string;
+}
+
+async function getCertificates() {
+  const command = new GetParametersByPathCommand({
+    Path: '/OpenIddictServerlessDemo/Certificates/',
+    WithDecryption: true,
+  });
+
+  const response = await ssmClient.send(command);
+
+  if (!response.Parameters) {
+    throw new Error('Could not fetch SSM parameters');
+  }
+
+  const encryptionParameter = response.Parameters.find(({ Name }) =>
+    Name?.endsWith('EncryptionCertificate')
+  );
+  const signingParameter = response.Parameters.find(({ Name }) =>
+    Name?.endsWith('SigningCertificate')
+  );
+
+  if (!encryptionParameter?.Value || !signingParameter?.Value) {
+    throw new Error('Could not fetch SSM parameters');
+  }
+
+  return {
+    encryptionCertificate: getCertificateParts(encryptionParameter.Value),
+    signingCertificate: getCertificateParts(signingParameter.Value),
+  };
+}
+
+function getCertificateParts(certificate: string) {
+  const parts = certificate.split('-----\n-----');
+  const first = `${parts[0]}-----`;
+  const second = `-----${parts[1]}`;
+
+  return {
+    certificate: first.includes('BEGIN CERTIFICATE') ? first : second,
+    key: first.includes('BEGIN CERTIFICATE') ? second : first,
+  };
+}
+```
+
+Now, let's update our handler to fetch the certificates and return unauthorized if it fails:
+
+```typescript
+export const handler = async (event: CloudFrontRequestEvent) => {
+  const request = event.Records[0].cf.request;
+  const authHeader = request.headers['authorization']?.[0]?.value;
+
+  // Check if the user is authenticated
+  if (!authHeader) {
+    return respond('401', 'Unauthorized', 'User is not authenticated, no auth header present');
+  }
+
+  // Validate the token
+  try {
+    const { encryptionCertificate, signingCertificate } = await getCertificates();
+  } catch (error) {
+    console.error('Could not validate token', error);
+    return respond('401', 'Unauthorized', 'User is not authenticated');
+  }
+
+  // Allow the request to proceed to the origin
+  return request;
+};
+```
+
+The last piece of code that we need to add is to actually validate the tokens:
+
+```typescript
+import jwt, { JwtPayload } from 'jsonwebtoken';
+import { JWK, JWE } from 'node-jose';
+
+const ALLOWED_ISSUERS = ['https://abcdef123.execute-api.eu-north-1.amazonaws.com/'];
+
+export async function validateToken(
+  bearer: string,
+  signingCertificate: CertificateParts,
+  encryptionCertificate: CertificateParts
+): Promise<JwtPayload> {
+  const token = bearer.replace('Bearer ', '');
+
+  const encryptionKey = await JWK.asKey(encryptionCertificate.key, 'pem');
+
+  const decryptedToken = await JWE.createDecrypt(encryptionKey).decrypt(token);
+  const decodedToken = decryptedToken.payload.toString();
+
+  return new Promise((resolve, reject) => {
+    jwt.verify(
+      decodedToken,
+      signingCertificate.certificate,
+      {
+        algorithms: ['RS256'],
+        issuer: ALLOWED_ISSUERS,
+      },
+      (err, decoded) => {
+        if (err || !decoded || typeof decoded !== 'object') {
+          console.error('Token validation failed', err);
+          reject('Invalid token');
+        } else {
+          resolve(decoded);
+        }
+      }
+    );
+  });
+}
+```
+
+Great, now let's tie together in our handler, either return unauthorized if the token is not valid or include user details as request headers for down stream processing:
+
+```
+export const handler = async (event: CloudFrontRequestEvent) => {
+  const request = event.Records[0].cf.request;
+  const authHeader = request.headers['authorization']?.[0]?.value;
+
+  // Check if the user is authenticated
+  if (!authHeader) {
+    return respond('401', 'Unauthorized', 'User is not authenticated, no auth header present');
+  }
+
+  // Validate the token
+  try {
+    const { encryptionCertificate, signingCertificate } = await getCertificates();
+    const result = await validateToken(authHeader, signingCertificate, encryptionCertificate);
+    request.headers['x-user-id'] = [{ key: 'X-User-Id', value: result.sub ?? '' }];
+    request.headers['x-user-email'] = [{ key: 'X-User-Email', value: result.email ?? '' }];
+  } catch (error) {
+    console.error('Could not validate token', error);
+    return respond('401', 'Unauthorized', 'User is not authenticated');
+  }
+
+  // Allow the request to proceed to the origin
+  return request;
+};
+```
