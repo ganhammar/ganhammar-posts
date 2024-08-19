@@ -7,7 +7,7 @@ status: draft
 
 # Using Lambda@Edge as Authorizer for Lambda Function URL
 
-With the [relatively new addition](https://aws.amazon.com/about-aws/whats-new/2024/04/amazon-cloudfront-oac-lambda-function-url-origins/) of Origin Access Control (OAC) for Lambda Function URLs origins, it is possible to connect a CloudFront distribution directly with a Lambda function, only allowing it to access the function. Removing the need of using API Gateways infront of the Lambda function, which will lower your overall costs.
+With the [relatively new addition](https://aws.amazon.com/about-aws/whats-new/2024/04/amazon-cloudfront-oac-lambda-function-url-origins/) of Origin Access Control (OAC) for Lambda Function URL origins, it is possible to connect a CloudFront distribution directly with a Lambda function, only allowing it to access the function. Removing the need of using API Gateways infront of the Lambda function, which will lower your overall costs.
 
 With API Gateway, you would typically use an authorizer to authorize a request before the Lambda is invoked, which there is no out-of-the-box support for with only CloudFront and Lambda Function URLs. In this post we will explore using a Lambda@Edge function as an authorizer, to mimic the same behaviour. The authorizer will look for an OIDC/OAuth 2.0 authorization token in the request header and validate it, using signing and encyption certificates stored in Systems Manager Parameter Store, this to try to keep the external dependencies to a minimum.
 
@@ -15,9 +15,9 @@ With API Gateway, you would typically use an authorizer to authorize a request b
 
 We will use Node as the runtime for the authorizer function (Lambda@Edge [support](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-at-edge-function-restrictions.html#lambda-at-edge-restrictions-runtime) Node and Python runtimes). And as the token issuer, we will use the OpenIddict server that we created in a previous post, [OpenIddict on AWS Serverless: Flexible OAuth2/OIDC Provider](https://www.ganhammar.se/posts/openiddict-on-aws-serverless-flexible-oauth2-oidc-provider), with some [small modifications](https://github.com/ganhammar/openiddict-serverless-demo/commit/95fe95d9c0b940ba72d2e469dffea1b4e24f9c57), converting the certificates to PEM format. Which has better Node support, especially since we want to avoid using openssl binaries, since it is not included in the Lambda runtime.
 
-The Authorizer function will use `node-jose` to create the signing and encyption keys using the PEM-certificates and `jsonwebtoken` to validate the passed authorization token. We'll also need to install `aws-lambda` and `@aws-sdk/client-ssm`, for the request interface definition and to fetch the certificates from SSM.
+For this project we will use TypeScript to define our functions, of which there will be two, the authorizer itself and the API that will be used as our default origin, which will be defined using [Hono](https://hono.dev/). The functions will be stored in `src/authorizer/index.ts` and `src/api/index.ts`, so, let's start with creating those files!
 
-Let's start with simply allowing requests with an authorization header and denying without:
+The Authorizer function will use `node-jose` to create the signing and encyption keys using the PEM-certificates and `jsonwebtoken` to validate the passed authorization token. We'll also need to install `aws-lambda` and `@aws-sdk/client-ssm`, for the request interface definition and to fetch the certificates from SSM. Let's start defining the authorizer function with simply allowing requests with an authorization header and denying without:
 
 ```typescript
 import { CloudFrontRequestEvent } from 'aws-lambda';
@@ -125,7 +125,7 @@ export const handler = async (event: CloudFrontRequestEvent) => {
 };
 ```
 
-The last piece of code that we need to add is to actually validate the tokens:
+The last piece of code that we need to add is to actually validate the tokens (make sure to replace the `ALLOWED_ISSUERS`):
 
 ```typescript
 import jwt, { JwtPayload } from 'jsonwebtoken';
@@ -193,3 +193,285 @@ export const handler = async (event: CloudFrontRequestEvent) => {
   return request;
 };
 ```
+
+# Deploying our Authorizer Function
+
+To deploy our infrastructure we will use [AWS SAM](https://aws.amazon.com/serverless/sam/). For this project we will deploy our CloudFront distribution in `eu-north-1`, but, since we want to use the authorizer function as an edge function, it must be deployed in `us-east-1`, which means that we will need two template files, one for the distribution and API function, and one for the authorizer function. Let's start defining the authorizer infrastructure in `template-authorizer.yml`:
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'A template for a Lambda function for JWT validation'
+
+Resources:
+  AuthorizerFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      CodeUri: './'
+      Handler: 'authorizer/index.handler'
+      Runtime: 'nodejs20.x'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 768
+      Timeout: 10
+      AutoPublishAlias: 'live'
+    Metadata:
+      BuildMethod: esbuild
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+                - 'edgelambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: 'LambdaSSMReadPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ssm:GetParametersByPath'
+                Resource:
+                  - !Sub 'arn:aws:ssm:eu-north-1:${AWS::AccountId}:parameter/OpenIddictServerlessDemo/Certificates/*'
+```
+
+For this project we'll use `makefile` as the build method, let's define the `Makefile`, which should be placed in the root of the project:
+
+```makefile
+build-AuthorizerFunction:
+	pnpm install
+	pnpm build
+	cp -r dist/authorizer "$(ARTIFACTS_DIR)"
+```
+
+The build is dependent on `esbuild`, so let's install it as a dev dependency. The command is defined as `node build.js` where the `build.js` file contains the build instructions:
+
+```js
+import { build } from 'esbuild';
+
+const entryPoints = [
+  'authorizer',
+];
+
+entryPoints.forEach((entryPoint) => {
+  build({
+    entryPoints: [`src/${entryPoint}/index.ts`],
+    bundle: true,
+    platform: 'node',
+    target: 'node20',
+    outfile: `dist/${entryPoint}/index.js`,
+    external: ['aws-sdk'],
+  }).catch(() => process.exit(1));
+});
+```
+
+Great, let's deploy and test the authorizer function! Run `sam build --template-file template-authorizer.yml` followed by `sam deploy --region us-east-1 --no-fail-on-empty-changeset --stack-name lambda-at-edge-jwt-validation` and head in to the AWS console to test the authorizer out! Navigate to the Lambda function and go to the Test-tab, use the below event but replace `example-token` with a valid JWT.
+
+```json
+{
+  "Records": [
+    {
+      "cf": {
+        "request": {
+          "headers": {
+            "authorization": [
+              {
+                "key": "Authorization",
+                "value": "Bearer example-token"
+              }
+            ]
+          },
+          "method": "GET",
+          "querystring": "",
+          "uri": "/"
+        }
+      }
+    }
+  ]
+}
+```
+
+At this point you should get a request object back, which will be sent to the API function, if the validation was successfull or a `401` result if it was not. Let's proceed with defining the API function and the distribution stack!
+
+# Building the Distribution stack
+
+As mentioned, we will use Hono to define our API in this project, but, it can easily be replaced with the framework of your choice! Let's install Hono and start defining the API in `src/api/index.ts`:
+
+```typescript
+import { Hono } from 'hono';
+import { handle } from 'hono/aws-lambda';
+
+const app = new Hono();
+
+app.get('/', (c) => c.text('Hey from secure endpoint!'));
+
+export const handler = handle(app);
+```
+
+Great, that is it! Let's move on to defining the infrastructure! Before we start with defining the distribution stack, we need to make some additions to the Authorizer Function Lambda role, in order for Cloudfront to be able to use it as an edge function:
+
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: 'A template for a Lambda function for JWT validation'
+
+Resources:
+  ...
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+        ...
+        - PolicyName: 'LambdaAtEdgePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:GetDistribution
+                  - lambda:GetFunction
+                  - lambda:EnableReplication*
+                  - lambda:DisableReplication*
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/*'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/*'
+
+Outputs:
+  AuthorizerFunctionVersionArn:
+    Value: !Ref AuthorizerFunction.Version
+    Export:
+      Name: AuthorizerFunctionVersionArn
+```
+
+The `AuthorizerFunctionVersionArn` export is going to be used as a parameter in the distribution stack. Now let's start defining the distribution stack in `template-distribution.yml`:
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'A template for a CloudFront distribution with a Lambda@Edge function for JWT validation'
+
+Parameters:
+  AuthorizerFunctionVersionArn:
+    Type: 'String'
+
+Resources:
+  ApiFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      CodeUri: './'
+      Handler: 'api/index.handler'
+      Runtime: 'nodejs20.x'
+      MemorySize: 768
+      Timeout: 10
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+    Metadata:
+      BuildMethod: makefile
+
+  ApiFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref ApiFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${EdgeJwtValidationDistribution}'
+
+  EdgeJwtValidationDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        DefaultCacheBehavior:
+          TargetOriginId: 'LambdaOrigin'
+          ViewerProtocolPolicy: 'redirect-to-https'
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # CachingDisabled
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AllViewerExceptHostHeader
+          AllowedMethods:
+            - 'GET'
+            - 'HEAD'
+            - 'OPTIONS'
+            - 'PUT'
+            - 'PATCH'
+            - 'POST'
+            - 'DELETE'
+          LambdaFunctionAssociations:
+            - EventType: 'origin-request'
+              LambdaFunctionARN: !Ref AuthorizerFunctionVersionArn
+        Enabled: true
+        Origins:
+          - Id: 'LambdaOrigin'
+            DomainName: !Select [2, !Split ['/', !GetAtt ApiFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: 'https-only'
+            OriginAccessControlId: !Ref OAC
+
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: ApiFunctionOAC
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+Outputs:
+  DistributionId:
+    Value: !Ref EdgeJwtValidationDistribution
+    Export:
+      Name: DistributionId
+```
+
+Since we want to limit who can access the Lambda Function URL using Origin Access Control (OAC), we're setting the `AuthType` to `AWS_IAM` and giving the CloudFront distribution access to invoke the Function URL. We're also defining the `OriginAccessControl` to ensure that requests to the Lambda origin are properly signed and authenticated.
+
+We're associating the `LambdaOrigin` cache behaviour with the authorizer edge function through the ARN that is passed as an input parameter to the template, using the event type `origin-request`, which allows us to interact with the request before it reaches the origin.
+
+Before we're able to deploy the distribution, we need to update the `Makefile` and `build.js`. For `build.js`, all we need to do is to add `api` to the array of entry points:
+
+```js
+const entryPoints = [
+  'api',
+  'authorizer',
+];
+```
+
+And, for the `Makefile`, we want to add `ApiFunction` build steps:
+
+```makefile
+build-ApiFunction:
+	pnpm install
+	pnpm build
+	cp -r dist/api "$(ARTIFACTS_DIR)"
+```
+
+Since the Authorizer Lambda ARN is expected as input for the distribution template, we'll write a shell script that first deploys the authorizer, extracts the Lambda ARN from the output and then deploys the distribution with the ARN as input:
+
+```sh
+#!/bin/bash
+
+stack_name="lambda-at-edge-jwt-validation"
+
+# Deploy the authorizer Lambda function stack
+sam build --template-file template-authorizer.yml
+sam deploy --region us-east-1 --no-fail-on-empty-changeset --stack-name $stack_name
+lambda_arn=$(aws cloudformation describe-stacks --region us-east-1 --stack-name $stack_name --query "Stacks[0].Outputs[?OutputKey=='AuthorizerFunctionVersionArn'].OutputValue" --output text)
+
+# Deploy the CloudFront distribution stack
+sam build --template-file template-distribution.yml
+sam deploy --region eu-north-1 --parameter-overrides AuthorizerFunctionVersionArn=$lambda_arn --no-fail-on-empty-changeset --stack-name $stack_name
+```
+
+That should be it! Now you should have a CloudFront distribution deployed, using a Lambda function as an authorizer, which calls an API function if the request is authorized and otherwise returns a `401` (Unauthorized).
+
+# Considerations
+
+The certificates is currently only stored in one region, `eu-north-1`, to avoid network latencies during the authorization, a good next step could be to replicate the certificates to more regions and fetch from region based on which edge location is processing the request, using the environment variable `AWS_REGION`, before retrieving the parameters.
