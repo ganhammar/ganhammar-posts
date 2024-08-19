@@ -166,7 +166,7 @@ export async function validateToken(
 }
 ```
 
-Great, now let's tie together in our handler, either return unauthorized if the token is not valid or include user details as request headers for down stream processing:
+Great, now let's tie it all together in our handler, either return unauthorized if the token is not valid or include user details as request headers for down stream processing:
 
 ```
 export const handler = async (event: CloudFrontRequestEvent) => {
