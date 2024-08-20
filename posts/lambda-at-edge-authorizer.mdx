@@ -2,7 +2,7 @@
 title: Lambda@Edge Authorizer
 id: lambda-at-edge-authorizer
 date: 2023-08-19
-status: draft
+status: published
 ---
 
 # Using Lambda@Edge as Authorizer for Lambda Function URL
@@ -477,3 +477,7 @@ That should be it! Now you should have a CloudFront distribution deployed, using
 # Considerations
 
 The certificates are currently only stored in one region, `eu-north-1`, to avoid network latencies during the authorization. A good next step could be to replicate the certificates to more regions and fetch from the region based on which edge location is processing the request, using the environment variable `AWS_REGION`, before retrieving the parameters.
+
+# Companion Repository
+
+The companion repository for this post can be found [here](https://github.com/ganhammar/lambda-at-edge-jwt-validation).
