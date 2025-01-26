@@ -1,0 +1,107 @@
+---
+title: API Routing Using CloudFront Function
+id: api-routing-using-cloudfront-function
+date: 2023-01-26
+status: published
+---
+
+# API Routing Using CloudFront Function
+
+CloudFront is [limited to 25 cache behaviors per distribution](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-limits.html#limits-web-distributions). The quota can be increased, but restrictions still apply, and there is an upper limit to the number of origins that can be routed through CloudFront. It has been possible to re-route the request using a Lambda@Edge function, but not using a CloudFront Function, at least until recently. Around re:Invent, [AWS announced that Amazon CloudFront Functions now allow origin modifications](https://aws.amazon.com/about-aws/whats-new/2024/11/amazon-cloudfront-origin-modifications-cloudfront-functions/), which will reduce latency and costs compared to using a Lambda@Edge function as the edge router.
+
+## Building the Edge Router
+
+We will be using AWS SAM to define our infrastructure for this project. The stack will contain a CloudFront Distribution with a default origin that has a CloudFront Function acting as the edge router using the `viewer-request` event type. The function must use the JavaScript runtime 2.0.
+
+### Modifying the Origin
+
+Modifying the origin is done through the helper method `updateRequestOrigin`, which is exported in the CloudFront Functions module. In the example below, we're changing the request origin to target an API Gateway instance. The helper method can also be used to update other origin settings, such as changing the Origin Access Control (OAC). See the [documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/helper-functions-origin-modification.html) for all settings.
+
+```javascript
+import cf from 'cloudfront';
+
+// ...
+
+cf.updateRequestOrigin({
+  domainName: '0000000000.execute-api.eu-north-1.amazonaws.com'
+});
+```
+
+### The Stack Definition
+
+```yml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: CloudFront Function Edge Router
+
+Resources:
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Origins:
+          - Id: DefaultOrigin
+            DomainName:
+              Fn::Sub: "my-app-bucket.s3.${AWS::Region}.${AWS::URLSuffix}"
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt S3OriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: DefaultOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # CachingDisabled
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # AllViewerExceptHostHeader
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt Router.FunctionMetadata.FunctionARN
+  Router:
+    Type: AWS::CloudFront::Function
+    Properties:
+      AutoPublish: true
+      FunctionCode: |
+        import cf from 'cloudfront';
+
+        function handler(event) {
+          const request = event.request;
+          const uri = request.uri;
+
+          if (uri.startsWith('/api')) {
+            const apiName = uri.split('/')[2]; // The first path parameter indicates where to route the request
+            let apiGatewayId = '0000000000';
+
+            switch (apiName) {
+              case 'my-api':
+                apiGatewayId = '1111111111';
+                break;
+            }
+
+            const apiGatewayPath = uri.split('/').slice(3).join('/'); // Strip /api/ from the uri
+            const domainName = `${apiGatewayId}.execute-api.eu-north-1.amazonaws.com`;
+
+            request.uri = `/${apiGatewayPath}`;
+
+            cf.updateRequestOrigin({
+              domainName: domainName,
+              originAccessControlConfig: {
+                enabled: false
+              }
+            });
+          }
+
+          return request;
+        }
+      FunctionConfig:
+        Comment: "Router function, forwards requests to the appropriate API Gateway if path starts with /api"
+        Runtime: "cloudfront-js-2.0"
+      Name: "router"
+  S3OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: S3OriginAccessControl
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+```
