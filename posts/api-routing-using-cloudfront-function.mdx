@@ -7,7 +7,7 @@ status: published
 
 # API Routing Using CloudFront Function
 
-CloudFront is [limited to 25 cache behaviors per distribution](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-limits.html#limits-web-distributions). The quota can be increased, but restrictions still apply, and there is an upper limit to the number of origins that can be routed through CloudFront. It has been possible to re-route the request using a Lambda@Edge function, but not using a CloudFront Function, at least until recently. Around re:Invent, [AWS announced that Amazon CloudFront Functions now allow origin modifications](https://aws.amazon.com/about-aws/whats-new/2024/11/amazon-cloudfront-origin-modifications-cloudfront-functions/), which will reduce latency and costs compared to using a Lambda@Edge function as the edge router.
+CloudFront is [limited to 25 cache behaviors per distribution](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-limits.html#limits-web-distributions). The quota can be increased, but restrictions still apply, there is an upper limit to the number of origins that can be routed through CloudFront. It has been possible to re-route the request using a Lambda@Edge function, but not using a CloudFront Function, at least until recently. Around re:Invent, [AWS announced that Amazon CloudFront Functions now allow origin modifications](https://aws.amazon.com/about-aws/whats-new/2024/11/amazon-cloudfront-origin-modifications-cloudfront-functions/), which will reduce latency and costs compared to using a Lambda@Edge function as the edge router.
 
 ## Building the Edge Router
 
