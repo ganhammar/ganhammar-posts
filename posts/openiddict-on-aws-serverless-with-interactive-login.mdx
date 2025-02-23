@@ -9,3 +9,140 @@ status: draft
 
 In a [previous post](https://www.ganhammar.se/posts/openiddict-on-aws-serverless-flexible-oauth2-oidc-provider), I described how OpenIddict, a flexible OAuth2/OIDC provider, can be deployed on AWS using only Serverless components such as AWS Lambda, API Gateway, DynamoDB, and Systems Manager Parameter Store. In this post, I'll demonstrate how to extend this demo project with interactive login using Amazon S3 and Amazon CloudFront. If you haven't checked out the first post and created the baseline for this project, I recommend starting there!
 
+# Implementation
+
+Let's jump straight into the implementation! Firstly, we will update the [openiddict-serverless-demo](https://github.com/ganhammar/openiddict-serverless-demo/tree/post-1) project to support interactive login, focusing on the [Authorization Code Flow](https://auth0.com/docs/get-started/authentication-and-authorization-flow/authorization-code-flow). Then we will create a new frontend project, which will use Vite, React, and Radix UI, and will proxy unmatched requests to the OpenIddict API. Finally, we'll add a CloudFront instance with two origins: S3 for the frontend project and API Gateway for the backend project.
+
+## Adding Interactive Login
+
+OpenIddict handles the authentication protocols and token issuance; it does not manage user accounts. Therefore, we must add a framework that can manage user accounts, such as [ASP.NET Core Identity](https://learn.microsoft.com/en-us/aspnet/core/security/authentication/identity). Since we're running on AWS Serverless, we'll use the DynamoDB provider [AspNetCore.Identity.AmazonDynamoDB](https://github.com/ganhammar/AspNetCore.Identity.AmazonDynamoDB). From the root of the `openiddict-serverless-demo` project, add the package with the following command:
+
+```sh
+> dotnet add package AspNetCore.Identity.AmazonDynamoDB --project src/OpenIddictServerlessDemo
+```
+
+Now we must configure the framework. In `Program.cs`, add the following code before the point where we configure OpenIddict (`AddOpenIddict`):
+
+```csharp
+services
+    .AddIdentity<DynamoDbUser, DynamoDbRole>()
+    .AddDefaultTokenProviders()
+    .AddDynamoDbStores()
+    .SetDefaultTableName("openiddict-serverless-demo.identity");
+```
+
+Next, in the block where we configure the OpenIddict server, we currently allow the Client Credentials flow. Add the following code to configure the authorize endpoint and to allow the Authorization Code flow:
+
+```csharp
+builder.SetAuthorizationEndpointUris("/connect/authorize");
+builder.AllowAuthorizationCodeFlow();
+```
+
+Great, let's move on to the endpoints that we'll need to add for login to work. We're going to need two of them, one endpoint to check if the current user is already logged in and one endpoint to handle the actual login:
+
+```csharp
+app.MapPost("/api/user/login", [Consumes("application/json")] async (
+  LoginInput? login,
+  HttpContext httpContext,
+  UserManager<DynamoDbUser> userManager,
+  SignInManager<DynamoDbUser> signInManager) =>
+{
+  if (string.IsNullOrEmpty(login?.Email) || string.IsNullOrEmpty(login?.Password))
+  {
+    return Results.BadRequest();
+  }
+
+  var user = await userManager.FindByEmailAsync(login.Email);
+  if (user == default)
+  {
+    return Results.BadRequest();
+  }
+
+  return Results.Ok(new LoginResult(
+    await signInManager.PasswordSignInAsync(
+      user.UserName!, login.Password, false, false)));
+});
+
+app.MapGet("/api/user/current", async(
+  HttpContext httpContext,
+  UserManager<DynamoDbUser> userManager
+) =>
+{
+  if (httpContext!.User?.Identity?.IsAuthenticated != true)
+  {
+    return Results.NotFound();
+  }
+
+  var user = await userManager.GetUserAsync(httpContext!.User);
+  return Results.Ok(user);
+});
+```
+All endpoints are routed through `/api/` to simplify the CloudFront configuration. Otherwise, we would need one cache behavior per resource (`user` and `connect` today). This means we will also change the path for `/connect/token` to `/api/connect/token`.
+
+The login endpoint depends on two models: one for the input and one for the output. Let's add them by creating two new files in a new `Models` folder. Start with `LoginInput.cs`, which only needs two properties, `Email` and `Password`:
+
+```csharp
+namespace OpenIddictServerlessDemo.Models;
+
+public class LoginInput
+{
+    public string? Email { get; set; }
+    public string? Password { get; set; }
+}
+```
+
+Next, add `LoginResult.cs`, which informs the frontend project about the login result. Some properties are not necessarily needed for this project but provide hints on how it can be extended.
+
+```csharp
+using Microsoft.AspNetCore.Identity;
+
+namespace OpenIddictServerlessDemo.Models;
+
+public class LoginResult(SignInResult signInResult)
+{
+    public bool Succeeded { get; set; } = signInResult.Succeeded;
+    public bool IsLockedOut { get; set; } = signInResult.IsLockedOut;
+    public bool IsNotAllowed { get; set; } = signInResult.IsNotAllowed;
+    public bool RequiresTwoFactor { get; set; } = signInResult.RequiresTwoFactor;
+}
+```
+
+Note that the models are in another namespace, so ensure to add the necessary `using` statements in `Program.cs`.
+
+Before moving on to the frontend project, we need to add a demo user to test the login functionality. Add the following to the end of `Program.cs`, where the rest of the setup script is:
+
+```csharp
+OpenIddictDynamoDbSetup.EnsureInitialized(app.Services);
+AspNetCoreIdentityDynamoDbSetup.EnsureInitialized(app.Services); // Add this
+using (var scope = app.Services.CreateScope())
+{
+    CreateDemoClient(scope.ServiceProvider).GetAwaiter().GetResult();
+    CreateDemoUser(scope.ServiceProvider).GetAwaiter().GetResult(); // And this
+}
+
+static async Task CreateDemoUser(IServiceProvider provider)
+{
+    var manager = provider.GetRequiredService<UserManager<DynamoDbUser>>();
+    var user = new DynamoDbUser
+    {
+        UserName = "Alice",
+        Email = "alice@wonderland.com"
+    };
+
+    await manager.CreateAsync(user, "Pass@word1");
+}
+```
+
+## Building the Frontend
+
+For the frontend project, we'll be using Vite as the build tool and React with Radix UI as the UI frameworks. Let's use the React with TypeScript template offered by the Vite community as the base. In a new folder, run the following command:
+
+```sh
+> npm create vite@latest . -- --template react-ts
+```
+
+We will build two screens: one for users to log in and another for users who are already logged in.
+
+| Login Screen | Logged-in Screen |
+| --- | --- |
+| ![Screenshot of Login Screen](./assets/interactive-login.png) | ![Screenshot of Logged-in Screen](./assets/interactive-logged-in.png) |
