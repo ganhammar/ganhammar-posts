@@ -141,8 +141,145 @@ For the frontend project, we'll be using Vite as the build tool and React with R
 > npm create vite@latest . -- --template react-ts
 ```
 
-We will build two screens: one for users to log in and another for users who are already logged in.
+Let's also install the dependencies that we'll be using for this project:
+
+```sh
+> npm i radix-ui @radix-ui/themes styled-components
+```
+
+We will build two screens: one for users to log in and another for users who are already logged in. The expected end result should look like this:
 
 | Login Screen | Logged-in Screen |
 | --- | --- |
 | ![Screenshot of Login Screen](./assets/interactive-login.png) | ![Screenshot of Logged-in Screen](./assets/interactive-logged-in.png) |
+
+Before we get started with the login view, we need to add some boilerplating for Radix UI and Styled-Components following the [official usage guides](https://www.radix-ui.com/colors/docs/overview/usage#styled-components). Let's update `main.tsx`, adding theming, suspense loader fallback, and the container where the app will be rendered:
+
+```tsx
+import { Suspense, StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App.tsx";
+import { gray } from "@radix-ui/colors";
+import { ThemeProvider } from "styled-components";
+import { StrictMode, Suspense } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+
+import "@radix-ui/themes/styles.css";
+import { Flex, Spinner, Theme } from "@radix-ui/themes";
+
+const theme = {
+    colors: {
+        ...gray,
+    },
+};
+
+createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+        <Theme>
+            <ThemeProvider theme={theme}>
+                <Flex align="center" justify="center" height="100vh">
+                    <Suspense fallback={<Spinner />}>
+                        <App />
+                    </Suspense>
+                </Flex>
+            </ThemeProvider>
+        </Theme>
+    </StrictMode>
+);
+```
+The font that we're using for the login header is _Pacifico_. Let's add the reference to `index.html` by adding the following line somewhere in the `head` section:
+
+```html
+<link href="https://fonts.googleapis.com/css?family=Pacifico" rel="stylesheet">
+```
+
+The last thing that we'll do before moving on with the business logic is to add the proxy server. We want to mimic how the application will behave once we have the CloudFront instance in front. All requests to `/api/*` should be routed to the OpenIddict API. This can be done by updating the `vite.config.ts` with the following server section in the config:
+
+```ts
+export default defineConfig({
+    plugins: [react()],
+    server: {
+        proxy: {
+            "/api": {
+                target: "http://localhost:3001", // Port may vary
+                changeOrigin: true,
+                secure: false,
+            },
+        },
+    },
+});
+```
+
+We will not be using any router in this demo project. Instead, we will determine which view to render based on whether the user is logged in. This logic will be in `App.tsx`. We will call the `/api/user/current` endpoint and, based on the result, either display the _Profile_ or the _Login_ page.
+
+First, we'll define the shape of the user response, if logged in. In a new folder, `types`, create the file `user.d.ts` and let's add the properties we care about in this demo:
+
+```ts
+export type User = {
+    email: string;
+    userName: string;
+};
+```
+
+Great! Now let's define the function that will call the above-mentioned API and return a User instance or null, depending on the HTTP status of the request. In a new folder, `utils`, create the file `checkUser.ts`:
+
+```ts
+import { User } from "../types/user";
+
+export const checkUser = async (): Promise<User | null> => {
+    const res = await fetch("/api/user/current");
+
+    if (res.ok) {
+        return await res.json();
+    }
+
+    return null;
+};
+```
+Now it is time to define `App.tsx`. We will rely on React suspense to render a spinner, defined in `main.tsx`, while the result from the server is pending, using React 19's [use-hook](https://react.dev/reference/react/use). Upon login, the `onLogin` callback will be called, which will update the promise by retriggering the API call that the `use` hook is dependent on, re-rendering the spinner while again waiting for the server response:
+
+```tsx
+import { use, useState } from "react";
+import { Box, Flex, Heading } from "@radix-ui/themes";
+import styled from "styled-components";
+import Login from "./Components/Login";
+import Profile from "./Components/Profile";
+import { checkUser } from "./utils/checkUser";
+
+const MainBox = styled(Box)`
+  background-color: ${({ theme }) => theme.colors.gray1};
+  border-radius: var(--radius-4);
+  box-shadow: var(--shadow-3);
+`;
+
+const MainHeading = styled(Heading)`
+  font-family: Pacifico;
+  color: ${({ theme }) => theme.colors.gray11};
+  margin: 0 0 var(--space-5) 0;
+`;
+
+const checkUserPromise = checkUser();
+
+function App() {
+  const [promise, updatePromise] = useState(checkUserPromise);
+  const user = use(promise);
+
+  const update = () => {
+    updatePromise(checkUser());
+  };
+
+  return (
+    <MainBox width="400px" p="5">
+      <Flex justify="center">
+        <MainHeading as="h1">Login</MainHeading>
+      </Flex>
+      {user ? <Profile user={user} /> : <Login onLogin={update} />}
+    </MainBox>
+  );
+}
+
+export default App;
+```
+
+
