@@ -13,6 +13,8 @@ In a [previous post](https://www.ganhammar.se/posts/openiddict-on-aws-serverless
 
 Let's jump straight into the implementation! Firstly, we will update the [openiddict-serverless-demo](https://github.com/ganhammar/openiddict-serverless-demo/tree/post-1) project to support interactive login, focusing on the [Authorization Code Flow](https://auth0.com/docs/get-started/authentication-and-authorization-flow/authorization-code-flow). Then we will create a new frontend project, which will use Vite, React, and Radix UI, and will proxy unmatched requests to the OpenIddict API. Finally, we'll add a CloudFront instance with two origins: S3 for the frontend project and API Gateway for the backend project.
 
+![Architecture Diagram](./assets/interactive-architecture.png)
+
 ## Adding Interactive Login
 
 OpenIddict handles the authentication protocols and token issuance; it does not manage user accounts. Therefore, we must add a framework that can manage user accounts, such as [ASP.NET Core Identity](https://learn.microsoft.com/en-us/aspnet/core/security/authentication/identity). Since we're running on AWS Serverless, we'll use the DynamoDB provider [AspNetCore.Identity.AmazonDynamoDB](https://github.com/ganhammar/AspNetCore.Identity.AmazonDynamoDB). From the root of the `openiddict-serverless-demo` project, add the package with the following command:
