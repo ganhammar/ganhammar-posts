@@ -1,7 +1,7 @@
 ---
 title: "OpenIddict on AWS Serverless: Adding Interactive Login"
 id: openiddict-on-aws-serverless-with-interactive-login
-date: 2025-02-18
+date: 2025-02-24
 status: draft
 ---
 
@@ -153,17 +153,16 @@ We will build two screens: one for users to log in and another for users who are
 | --- | --- |
 | ![Screenshot of Login Screen](./assets/interactive-login.png) | ![Screenshot of Logged-in Screen](./assets/interactive-logged-in.png) |
 
+### Boilerplating
+
 Before we get started with the login view, we need to add some boilerplating for Radix UI and Styled-Components following the [official usage guides](https://www.radix-ui.com/colors/docs/overview/usage#styled-components). Let's update `main.tsx`, adding theming, suspense loader fallback, and the container where the app will be rendered:
 
 ```tsx
 import { Suspense, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import App from "./App.tsx";
+import { App } from "./App.tsx";
 import { gray } from "@radix-ui/colors";
 import { ThemeProvider } from "styled-components";
-import { StrictMode, Suspense } from "react";
-import { createRoot } from "react-dom/client";
-import App from "./App";
 
 import "@radix-ui/themes/styles.css";
 import { Flex, Spinner, Theme } from "@radix-ui/themes";
@@ -188,6 +187,7 @@ createRoot(document.getElementById("root")!).render(
     </StrictMode>
 );
 ```
+
 The font that we're using for the login header is _Pacifico_. Let's add the reference to `index.html` by adding the following line somewhere in the `head` section:
 
 ```html
@@ -237,49 +237,275 @@ export const checkUser = async (): Promise<User | null> => {
     return null;
 };
 ```
-Now it is time to define `App.tsx`. We will rely on React suspense to render a spinner, defined in `main.tsx`, while the result from the server is pending, using React 19's [use-hook](https://react.dev/reference/react/use). Upon login, the `onLogin` callback will be called, which will update the promise by retriggering the API call that the `use` hook is dependent on, re-rendering the spinner while again waiting for the server response:
+
+Now it is time to define `App.tsx`. We will rely on React suspense to render a spinner, defined in `main.tsx`, while the result from the server is pending, using React 19's [use-hook](https://react.dev/reference/react/use). Upon login, the `onLogin` callback will be called, which will update the promise by retriggering the API call that the `use` hook is dependent on, re-rendering the spinner while again waiting for the server response. Upon successful response, the user object will be passed to the Profile-view:
 
 ```tsx
 import { use, useState } from "react";
 import { Box, Flex, Heading } from "@radix-ui/themes";
 import styled from "styled-components";
-import Login from "./Components/Login";
-import Profile from "./Components/Profile";
+import { Login } from "./Components/Login";
+import { Profile } from "./Components/Profile";
 import { checkUser } from "./utils/checkUser";
 
 const MainBox = styled(Box)`
-  background-color: ${({ theme }) => theme.colors.gray1};
-  border-radius: var(--radius-4);
-  box-shadow: var(--shadow-3);
+    background-color: ${({ theme }) => theme.colors.gray1};
+    border-radius: var(--radius-4);
+    box-shadow: var(--shadow-3);
 `;
 
 const MainHeading = styled(Heading)`
-  font-family: Pacifico;
-  color: ${({ theme }) => theme.colors.gray11};
-  margin: 0 0 var(--space-5) 0;
+    font-family: Pacifico;
+    color: ${({ theme }) => theme.colors.gray11};
+    margin: 0 0 var(--space-5) 0;
 `;
 
 const checkUserPromise = checkUser();
 
-function App() {
-  const [promise, updatePromise] = useState(checkUserPromise);
-  const user = use(promise);
+export function App() {
+    const [promise, updatePromise] = useState(checkUserPromise);
+    const user = use(promise);
 
-  const update = () => {
-    updatePromise(checkUser());
-  };
+    const update = () => {
+        updatePromise(checkUser());
+    };
 
-  return (
-    <MainBox width="400px" p="5">
-      <Flex justify="center">
-        <MainHeading as="h1">Login</MainHeading>
-      </Flex>
-      {user ? <Profile user={user} /> : <Login onLogin={update} />}
-    </MainBox>
-  );
+    return (
+        <MainBox width="400px" p="5">
+            <Flex justify="center">
+                <MainHeading as="h1">Login</MainHeading>
+            </Flex>
+            {user ? <Profile user={user} /> : <Login onLogin={update} />}
+        </MainBox>
+    );
 }
-
-export default App;
 ```
 
+### Login Screen
 
+Let's move on to the login screen. In a new folder, `Components`, create the file `Login.tsx`. For this view, we'll use the `Form` component from Radix UI, which makes input validation a breeze. We'll also use the React [useActionState-hook](https://react.dev/reference/react/useActionState) to indicate that the form is being processed after submission, as well as rendering an error message if the response isn't successful. If it is successful, we'll trigger the `onLogin` callback function mentioned in the previous section.
+
+
+```tsx
+import { useActionState } from "react";
+import { Form } from "radix-ui";
+import { Box, Button, TextField, Flex, Text, Callout } from "@radix-ui/themes";
+
+export function Login({ onLogin }: { onLogin: () => void }) {
+    const [result, onSubmit, isPending] = useActionState(
+        async (_: Record<string, string>, formData: FormData) => {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+
+            const response = await fetch("/api/user/login", {
+                method: "POST",
+                body: JSON.stringify(Object.fromEntries(formData)),
+                headers: {
+                    "Content-Type": "application/json",
+                },
+            });
+
+            if (!response.ok) {
+                return {
+                    error: `Oops! (Status: ${response.statusText})`,
+                };
+            }
+
+            onLogin();
+            return await response.json();
+        },
+        null
+    );
+
+    return (
+        <Form.Root action={onSubmit}>
+            <Box mb="4">
+                <Form.Field name="email">
+                    <Flex justify="between">
+                        <Form.Label>Email</Form.Label>
+                        <Form.Message className="FormMessage" match="valueMissing">
+                            <Text size="2">Please enter your email</Text>
+                        </Form.Message>
+                        <Form.Message className="FormMessage" match="typeMismatch">
+                            <Text size="2">Please provide a valid email</Text>
+                        </Form.Message>
+                    </Flex>
+                    <Form.Control asChild>
+                        <TextField.Root type="email" required></TextField.Root>
+                    </Form.Control>
+                </Form.Field>
+            </Box>
+            <Box mb="4">
+                <Form.Field name="password">
+                    <Flex justify="between">
+                        <Form.Label>Password</Form.Label>
+                        <Form.Message className="FormMessage" match="valueMissing">
+                            <Text size="2">Please enter your password</Text>
+                        </Form.Message>
+                    </Flex>
+                    <Form.Control asChild>
+                        <TextField.Root type="password" required></TextField.Root>
+                    </Form.Control>
+                </Form.Field>
+            </Box>
+            {result?.error && (
+                <Callout.Root color="red" mb="4">
+                    <Callout.Text>{result.error}</Callout.Text>
+                </Callout.Root>
+            )}
+            <Flex justify="end">
+                <Form.Submit asChild>
+                    <Button loading={isPending}>Login</Button>
+                </Form.Submit>
+            </Flex>
+        </Form.Root>
+    );
+}
+```
+
+### Profile Screen
+
+The last screen that we'll add is the Profile view. This view accepts the user object as input and renders a, for now, disabled form where the user can update their email:
+
+```tsx
+import { Box, Button, Flex, Text, TextField } from "@radix-ui/themes";
+import { Label } from "radix-ui";
+import { User } from "../types/user";
+
+export function Profile({ user: { userName, email } }: { user: User }) {
+    const ucFirst = (str: string) => str.charAt(0).toUpperCase() + str.slice(1);
+
+    return (
+        <Box>
+            <Text weight="medium" size="4">
+                Welcome back, {ucFirst(userName)}!
+            </Text>
+            <Box my="4">
+                <Label.Root>Email</Label.Root>
+                <TextField.Root type="email" disabled value={email}></TextField.Root>
+            </Box>
+            <Flex justify="end">
+                <Button disabled>Update</Button>
+            </Flex>
+        </Box>
+    );
+}
+```
+
+## Defining the Stack
+
+We'll continue to use AWS SAM to define our stack. The stack for the frontend app is relatively simple, except for the dependency between the CloudFront instance, which we are yet to define, and the S3 bucket where we need to allow the instance to access it. Similarly, we need the S3 bucket name for the CloudFront origin. To work around this, we will use CloudFormation conditions to only deploy the `GetObject` policy if the distribution ARN is set:
+
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: OpenIddict Interactive Login Serverless Demo
+
+Parameters:
+    DistributionArn:
+        Type: String
+        Description: The ARN of the CloudFront distribution to allow access to the bucket
+        Default: ''
+
+Conditions:
+    HasDistributionArn: !Not [!Equals [!Ref DistributionArn, '']]
+
+Resources:
+    LoginWeb:
+        Type: AWS::S3::Bucket
+
+    LoginWebPolicy:
+        Type: 'AWS::S3::BucketPolicy'
+        Condition: HasDistributionArn
+        Properties:
+            Bucket: !Ref LoginWeb
+            PolicyDocument:
+                Statement:
+                    - Action: 's3:GetObject'
+                        Resource: !Sub '${LoginWeb.Arn}/*'
+                        Principal:
+                            Service: 'cloudfront.amazonaws.com'
+                        Effect: 'Allow'
+
+Outputs:
+    LoginWebBucketName:
+        Description: "The name of the LoginWeb S3 bucket"
+        Value: !Ref LoginWeb
+```
+Now it's time to add the CloudFront instance, which we will add in the stack where we have the API, at least for this proof-of-concept project. The first thing we'll need to do is to add the `WebBucketName` parameter, passing the name from the frontend stack:
+
+```yaml
+Parameters:
+    WebBucketName:
+        Type: String
+        Description: The name of the Web S3 bucket
+```
+
+Then we also need to add the `identity` table to the CRUD policies:
+
+```yaml
+- DynamoDBCrudPolicy:
+    TableName: "openiddict-serverless-demo.identity"
+```
+
+And lastly, we'll add the CloudFront distribution with the two cache behaviors and S3 origin access control:
+
+```yaml
+    OpenIddictDistribution:
+        Type: AWS::CloudFront::Distribution
+        Properties:
+            DistributionConfig:
+                Enabled: true
+                Origins:
+                    - DomainName:
+                            Fn::Sub: "${OpenIddictApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+                        Id: OpenIddictApiOrigin
+                        CustomOriginConfig:
+                            HTTPPort: 80
+                            HTTPSPort: 443
+                            OriginProtocolPolicy: https-only
+                    - DomainName:
+                            Fn::Sub: "${WebBucketName}.s3.${AWS::Region}.${AWS::URLSuffix}"
+                        Id: OpenIddictWebOrigin
+                        S3OriginConfig:
+                            OriginAccessIdentity: ""
+                        OriginAccessControlId: !GetAtt S3OriginAccessControl.Id
+                CacheBehaviors:
+                    - PathPattern: /api/*
+                        TargetOriginId: OpenIddictApiOrigin
+                        ViewerProtocolPolicy: redirect-to-https
+                        AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+                        MinTTL: 0
+                        MaxTTL: 0
+                        DefaultTTL: 0
+                        ForwardedValues:
+                            QueryString: true
+                            Headers: ["Authorization"]
+                            Cookies:
+                                Forward: all
+                DefaultCacheBehavior:
+                    TargetOriginId: OpenIddictWebOrigin
+                    ViewerProtocolPolicy: redirect-to-https
+                    AllowedMethods: [GET, HEAD, OPTIONS]
+                    Compress: true
+                    DefaultTTL: 0
+                    ForwardedValues:
+                        QueryString: true
+                        Cookies:
+                            Forward: all
+    S3OriginAccessControl:
+        Type: AWS::CloudFront::OriginAccessControl
+        Properties:
+            OriginAccessControlConfig:
+                Name: OpenIddictDemoS3OriginAccessControl
+                OriginAccessControlOriginType: s3
+                SigningBehavior: always
+                SigningProtocol: sigv4
+```
+
+Remember to re-deploy the frontend stack with the ARN of the CloudFront distribution once it has been created.
+
+# Wrapping Up
+
+And that is it. In this project, we have extended the OpenIddict on AWS Serverless project with interactive login. To also utilize the project for generating tokens for your client apps, you'll need to add the `/api/connect/authorize` endpoint, as demonstrated [here](https://github.com/ganhammar/openiddict-serverless-demo/blob/main/src/OpenIddictServerlessDemo/Program.cs#L132) and in the [official OpenIddict sample projects](https://github.com/openiddict/openiddict-samples).
+
+There are two companion repositories for this project. The API project can be found [here](https://github.com/ganhammar/openiddict-serverless-demo), and the frontend project can be found [here](https://github.com/ganhammar/openiddict-interactive-login-serverless-demo).
