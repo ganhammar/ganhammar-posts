@@ -7,7 +7,7 @@ status: draft
 
 # Blazingly Fast Serverless Note App - Part 2: Building the Frontend
 
-In [part 1](https://www.ganhammar.se/posts/blazingly-fast-serverless-note-app), we built the backend API with .NET 10 Native AOT on AWS Lambda, integrated Amazon Bedrock for AI-powered tag suggestions, and set up DynamoDB for storage. Now let's build the frontend using Blazor WebAssembly with WASM AOT compilation and MudBlazor for Material Design components.
+In [part 1](https://www.ganhammar.se/posts/blazingly-fast-serverless-note-app-part-1), we built the backend API with .NET 10 Native AOT on AWS Lambda, integrated Amazon Bedrock for AI-powered tag suggestions, and set up DynamoDB for storage. Now let's build the frontend using Blazor WebAssembly with WASM AOT compilation and MudBlazor for Material Design components.
 
 # Frontend Implementation
 
@@ -568,4 +568,4 @@ The S3 bucket is configured for static website hosting, and CloudFront provides 
 
 With the frontend complete, we now have a full-stack serverless application built entirely in C#. The Blazor WebAssembly frontend with WASM AOT compilation loads quickly and provides a responsive Material Design interface. Combined with the Native AOT Lambda backend from part 1, the application delivers blazingly fast performance with zero idle costs.
 
-The complete code is available in the [companion repository](https://github.com/ganhammar/smart-noter), including the full CDK infrastructure definition and detailed setup instructions.
+The complete code is available in the [companion repository](https://github.com/ganhammar/smart-note-organizer), including the full CDK infrastructure definition and detailed setup instructions.
