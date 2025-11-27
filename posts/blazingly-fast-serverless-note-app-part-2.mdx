@@ -2,7 +2,7 @@
 title: "Blazingly Fast Serverless Note App with Blazor, Amazon Bedrock and .NET 10 Native AOT - Part 2"
 id: blazingly-fast-serverless-note-app-part-2
 date: 2026-11-27
-status: draft
+status: published
 ---
 
 # Blazingly Fast Serverless Note App - Part 2: Building the Frontend
@@ -55,8 +55,7 @@ Now, update `src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj` to enable W
 ```
 
 ## Add Authentication to the UI Project
-
-The UI will use Cognito's Hosted UI with OAuth2 authorization code flow. Create `wwwroot/appsettings.json`:
+The UI will use Cognito's Hosted UI with OAuth2 authorization code flow. Create `wwwroot/appsettings.json` and add the required configuration parameters, which you'll need to populate after deployment (or through the [deployment script](https://github.com/ganhammar/smart-note-organizer/blob/main/deploy.sh) in the reference repository):
 
 ```json
 {
@@ -70,47 +69,7 @@ The UI will use Cognito's Hosted UI with OAuth2 authorization code flow. Create 
   }
 }
 ```
-
-These values will be populated by the deployment script with actual CDK outputs.
-
-Now update `Program.cs` to load configuration and register authentication services:
-
-```csharp
-using Microsoft.AspNetCore.Components.Web;
-using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
-using SmartNoteOrganizer.UI;
-using SmartNoteOrganizer.UI.Services;
-using System.Net.Http.Json;
-using MudBlazor.Services;
-
-var builder = WebAssemblyHostBuilder.CreateDefault(args);
-builder.RootComponents.Add<App>("#app");
-builder.RootComponents.Add<HeadOutlet>("head::after");
-
-// Load configuration
-var http = new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) };
-var config = await http.GetFromJsonAsync<AppConfig>("appsettings.json");
-
-// Register services
-builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(config!.Api.BaseUrl) });
-builder.Services.AddScoped<IAuthService, AuthService>();
-builder.Services.AddSingleton(new AuthOptions(config!.Auth.CognitoUrl, config.Auth.ClientId, config.Auth.AppUrl));
-builder.Services.AddMudServices(config =>
-{
-    config.SnackbarConfiguration.PositionClass = MudBlazor.Defaults.Classes.Position.BottomRight;
-    config.SnackbarConfiguration.VisibleStateDuration = 2000;
-    config.SnackbarConfiguration.ShowTransitionDuration = 200;
-    config.SnackbarConfiguration.HideTransitionDuration = 200;
-});
-
-await builder.Build().RunAsync();
-
-record AppConfig(ApiConfig Api, AuthConfig Auth);
-record ApiConfig(string BaseUrl);
-record AuthConfig(string CognitoUrl, string ClientId, string AppUrl);
-```
-
-Create `Services/AuthService.cs` to handle the OAuth2 flow:
+Now we'll create the authentication service, `Services/AuthService.cs`. The service uses OAuth2 authorization code flow and stores the access token in `sessionStorage`. After the OAuth callback, it cleans up the URL by removing the authorization code.
 
 ```csharp
 using System.Net.Http.Json;
@@ -214,7 +173,28 @@ public record TokenResponse(
 );
 ```
 
-The service uses OAuth2 authorization code flow and stores the access token in `sessionStorage`, which persists on page refresh but clears when the tab closes. After the OAuth callback, it cleans up the URL by removing the authorization code.
+Now update `Program.cs` to load configuration and register the authentication services:
+
+```csharp
+using System.Net.Http.Json;
+
+// ...
+
+// Load configuration
+var http = new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) };
+var config = await http.GetFromJsonAsync<AppConfig>("appsettings.json");
+
+// Register services
+builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(config!.Api.BaseUrl) });
+builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddSingleton(new AuthOptions(config!.Auth.CognitoUrl, config.Auth.ClientId, config.Auth.AppUrl));
+
+await builder.Build().RunAsync();
+
+record AppConfig(ApiConfig Api, AuthConfig Auth);
+record ApiConfig(string BaseUrl);
+record AuthConfig(string CognitoUrl, string ClientId, string AppUrl);
+```
 
 ## Implement Blazor UI with MudBlazor
 
@@ -477,6 +457,22 @@ else
 ```
 
 The page shows a loading spinner during authentication initialization. The AI-generated tags are displayed as chips, and snackbar notifications provide feedback for operations.
+
+Finally, let's update `Program.cs` and add required MudBlazor services:
+
+```csharp
+using MudBlazor.Services;
+
+// ...
+
+builder.Services.AddMudServices(config =>
+{
+    config.SnackbarConfiguration.PositionClass = MudBlazor.Defaults.Classes.Position.BottomRight;
+    config.SnackbarConfiguration.VisibleStateDuration = 2000;
+    config.SnackbarConfiguration.ShowTransitionDuration = 200;
+    config.SnackbarConfiguration.HideTransitionDuration = 200;
+});
+```
 
 ## Update The Stack for Frontend
 
