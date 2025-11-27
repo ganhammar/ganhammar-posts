@@ -1,23 +1,23 @@
 ---
-title: "Blazingly Fast AI Powered Serverless Note App with Blazor, Amazon Bedrock and Dotnet 10 Native AOT"
-id: blazingly-fast-ai-powered-serverless-note-app
+title: "Blazingly Fast Serverless Note App with Blazor, Amazon Bedrock and .NET 10 Native AOT"
+id: blazingly-fast-serverless-note-app-part-1
 date: 2026-11-27
 status: draft
 ---
 
-# Blazingly Fast AI Powered Serverless Note App with Blazor, Amazon Bedrock and Dotnet 10 Native AOT
+# Blazingly Fast Serverless Note App with Blazor, Amazon Bedrock and .NET 10 Native AOT
 
-I have [already explored](https://www.ganhammar.se/posts/dotnet-8-aot-aws-lambda) buildig native AOT Lambda functions for dotnet 8, before the official runtime was [announced](https://aws.amazon.com/blogs/compute/introducing-the-net-8-runtime-for-aws-lambda/), using [Amazon Linux 2023 custom Lambda runtime](https://docs.aws.amazon.com/linux/al2023/ug/lambda.html). With this post, I wanted to revisit that topic but focusing on dotnet 10 with the adition of a frontend, using [Blazor](https://dotnet.microsoft.com/en-us/apps/aspnet/web-apps/blazor) and the component library [MudBlazor](https://mudblazor.com/). On top off that, I wanted to utilize [Amazon Bedrock](https://aws.amazon.com/bedrock/?sc_channel=ps&gad_campaignid=21048268986&gbraid=0AAAAADjHtp-DIi_ig6Ui4a04qUGgFAJlz) and the [Nova Lite](https://docs.aws.amazon.com/nova/latest/userguide/what-is-nova.html) AI model. The result is a blazingly fast AI powered note app, where Bedrock will be used to categorize notes that the user creates.
+I have [already explored](https://www.ganhammar.se/posts/dotnet-8-aot-aws-lambda) building native AOT Lambda functions for .NET 8, before the official runtime was [announced](https://aws.amazon.com/blogs/compute/introducing-the-net-8-runtime-for-aws-lambda/), using [Amazon Linux 2023 custom Lambda runtime](https://docs.aws.amazon.com/linux/al2023/ug/lambda.html). With this post, I wanted to revisit that topic but focusing on .NET 10 with the addition of a frontend, using [Blazor](https://dotnet.microsoft.com/en-us/apps/aspnet/web-apps/blazor) and the component library [MudBlazor](https://mudblazor.com/). On top of that, I wanted to utilize [Amazon Bedrock](https://aws.amazon.com/bedrock/) and the [Nova Lite](https://docs.aws.amazon.com/nova/latest/userguide/what-is-nova.html) AI model. The result is a blazingly fast AI powered note app, where Bedrock will be used to categorize notes that the user creates.
 
-One off the goals with this project is to utilize C# for the entire stack, therefore we will use [AWS Cloud Development Kit (CDK)](https://aws.amazon.com/cdk/) to define the infrastructure, in C#.
+One of the goals with this project is to utilize C# for the entire stack, therefore we will use [AWS Cloud Development Kit (CDK)](https://aws.amazon.com/cdk/) to define the infrastructure, in C#.
 
-If you are curious about the benefits of building native AOT applications in dotnet, checkout the [previous](https://www.ganhammar.se/posts/dotnet-8-aot-aws-lambda) post.
+If you are curious about the benefits of building native AOT applications in .NET, check out the [previous](https://www.ganhammar.se/posts/dotnet-8-aot-aws-lambda) post.
 
 # Implementation
 
 ## Solution Architecture
 
-Except for AWS Lambda and Amazon Bedrock, this project will utilize Amazon CloudFront, to serve the Blazor application with Amazon S3 as the static origin, Amazon Cognito for auth, and Amazon Dynamodb, where we will store the notes.
+In addition to AWS Lambda and Amazon Bedrock, this project will utilize Amazon CloudFront to serve the Blazor application with Amazon S3 as the static origin, Amazon Cognito for auth, and Amazon DynamoDB, where we will store the notes.
 
 ![Architecture Diagram](./assets/blazingly-fast-notes-arch.png)
 
@@ -48,9 +48,6 @@ dotnet new classlib -n SmartNoteOrganizer.Infrastructure -f net10.0 -o infra/Sma
 dotnet new classlib -n SmartNoteOrganizer.Shared -f net10.0 -o src/SmartNoteOrganizer.Shared
 dotnet new web -n SmartNoteOrganizer.Notes -f net10.0 -o src/SmartNoteOrganizer.Notes
 dotnet new classlib -n SmartNoteOrganizer.AI -f net10.0 -o src/SmartNoteOrganizer.AI
-
-# Frontend
-dotnet new blazorwasm -n SmartNoteOrganizer.UI -f net10.0 -o src/SmartNoteOrganizer.UI
 ```
 
 Now, let's add the required NuGet packages:
@@ -68,18 +65,14 @@ dotnet add src/SmartNoteOrganizer.Notes/SmartNoteOrganizer.Notes.csproj package 
 # AI
 dotnet add src/SmartNoteOrganizer.AI/SmartNoteOrganizer.AI.csproj package AWSSDK.BedrockRuntime
 
-# UI
-dotnet add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj package MudBlazor
-
 # References
 dotnet add src/SmartNoteOrganizer.Notes/SmartNoteOrganizer.Notes.csproj reference src/SmartNoteOrganizer.AI/SmartNoteOrganizer.AI.csproj
 dotnet add src/SmartNoteOrganizer.Notes/SmartNoteOrganizer.Notes.csproj reference src/SmartNoteOrganizer.Shared/SmartNoteOrganizer.Shared.csproj
-dotnet add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj reference src/SmartNoteOrganizer.Shared/SmartNoteOrganizer.Shared.csproj
 ```
 
 ## Shared Models
 
-Great! Let's get started with the code, starting with the shared models. Create the file `src/SmartNoteOrganizer.Shared/Models.cs` and define the `Note` models:
+Great! Now let's implement the shared models. Create the file `src/SmartNoteOrganizer.Shared/Models.cs` and define the `Note` models:
 
 ```csharp
 namespace SmartNoteOrganizer.Shared;
@@ -282,11 +275,11 @@ public class BedrockService(IAmazonBedrockRuntime bedrockClient) : IBedrockServi
 }
 ```
 
-Here we are using `amazon.nova-lite-v1:0`, which is AWS's fastest model, excellent for simple tasks like this.
+This uses `amazon.nova-lite-v1:0`, which is AWS's fastest model, excellent for simple tasks like this.
 
 ## Implement DynamoDB Repository
 
-Let's move back to the notes project and create `NotesRepository.cs`. The repository will handle two tasks, creating and listing user notes.
+Now create `NotesRepository.cs` in the notes project. The repository will handle two tasks: creating and listing user notes.
 
 ```csharp
 using Amazon.DynamoDBv2;
@@ -339,7 +332,7 @@ public class NotesRepository(IAmazonDynamoDB dynamoDb, string tableName) : INote
 }
 ```
 
-Now, let's update our dependency injection to add the required services, in `src/SmartNotesOrganizer.Notes/Program.cs`, add:
+Now update the dependency injection to add the required services, in `src/SmartNoteOrganizer.Notes/Program.cs`, add:
 
 ```csharp
 builder.Services.AddSingleton<IAmazonDynamoDB, AmazonDynamoDBClient>();
@@ -370,25 +363,194 @@ app.MapPost("/notes", async (CreateNoteRequest request, INotesRepository repo,
 });
 ```
 
-## Configure Blazor WebAssembly for AOT
+## Define Backend Infrastructure with CDK
 
-Before we jump into the UI project, make sure that you have the `wasm-tools` workload installed:
+Now let's create the backend infrastructure in `infra/SmartNoteOrganizer.Infrastructure/SmartNoteStack.cs`. Start with the DynamoDB table:
 
-```bash
-dotnet workload install wasm-tools
+```csharp
+using Amazon.CDK;
+using Amazon.CDK.AWS.Cognito;
+using Amazon.CDK.AWS.DynamoDB;
+using Amazon.CDK.AWS.IAM;
+using Amazon.CDK.AWS.Lambda;
+using Amazon.CDK.AWS.Apigatewayv2;
+using Amazon.CDK.AwsApigatewayv2Authorizers;
+using Amazon.CDK.AwsApigatewayv2Integrations;
+using Constructs;
+using Attribute = Amazon.CDK.AWS.DynamoDB.Attribute;
+
+namespace SmartNoteOrganizer.Infrastructure;
+
+public class SmartNoteStack : Stack
+{
+    private static readonly string[] BuildCommands =
+    [
+        "apt-get update",
+        "apt-get install -y clang zlib1g-dev",
+        "cd /asset-input/src/SmartNoteOrganizer.Notes",
+        "dotnet publish -c Release -r linux-arm64 -o /asset-output",
+        "chmod 755 /asset-output/bootstrap"
+    ];
+
+    public SmartNoteStack(Construct scope, string id, IStackProps? props = null) : base(scope, id, props)
+    {
+        // DynamoDB table with single-table design
+        var notesTable = new Table(this, "NotesTable", new TableProps
+        {
+            PartitionKey = new Attribute { Name = "PK", Type = AttributeType.STRING },
+            SortKey = new Attribute { Name = "SK", Type = AttributeType.STRING },
+            BillingMode = BillingMode.PAY_PER_REQUEST,
+            RemovalPolicy = RemovalPolicy.DESTROY
+        });
+
+        // Cognito User Pool
+        var userPool = new UserPool(this, "UserPool", new UserPoolProps
+        {
+            SelfSignUpEnabled = true,
+            SignInAliases = new SignInAliases { Email = true },
+            RemovalPolicy = RemovalPolicy.DESTROY
+        });
+
+        var userPoolDomain = userPool.AddDomain("UserPoolDomain", new UserPoolDomainOptions
+        {
+            CognitoDomain = new CognitoDomainOptions
+            {
+                DomainPrefix = "smart-notes-" + Account
+            }
+        });
+
+        // Define OAuth2 Resource Server with custom scopes
+        var readScope = new ResourceServerScope(new ResourceServerScopeProps
+        {
+            ScopeName = "read",
+            ScopeDescription = "Read access to notes"
+        });
+
+        var writeScope = new ResourceServerScope(new ResourceServerScopeProps
+        {
+            ScopeName = "write",
+            ScopeDescription = "Write access to notes"
+        });
+
+        var resourceServer = userPool.AddResourceServer("NotesResourceServer", new UserPoolResourceServerOptions
+        {
+            Identifier = "notes-api",
+            Scopes = [readScope, writeScope]
+        });
+
+        // Lambda function with Native AOT, ARM64, ZIP package
+        var lambdaFunction = new Function(this, "NotesFunction", new FunctionProps
+        {
+            Runtime = Runtime.PROVIDED_AL2023,
+            Architecture = Architecture.ARM_64,
+            Handler = "bootstrap",
+            Code = Code.FromAsset("../", new Amazon.CDK.AWS.S3.Assets.AssetOptions
+            {
+                Bundling = new BundlingOptions
+                {
+                    Image = DockerImage.FromRegistry("mcr.microsoft.com/dotnet/sdk:10.0"),
+                    User = "root",
+                    Command = ["bash", "-c", string.Join(" && ", BuildCommands)]
+                }
+            }),
+            MemorySize = 512,
+            Timeout = Duration.Seconds(30),
+            Environment = new Dictionary<string, string>
+            {
+                ["TABLE_NAME"] = notesTable.TableName,
+                ["ALLOWED_ORIGINS"] = "*"
+            }
+        });
+
+        // Grant permissions
+        notesTable.GrantReadWriteData(lambdaFunction);
+        lambdaFunction.AddToRolePolicy(new PolicyStatement(new PolicyStatementProps
+        {
+            Effect = Effect.ALLOW,
+            Actions = ["bedrock:InvokeModel"],
+            Resources = ["*"]
+        }));
+
+        // User Pool Client (callback URL will be updated in part 2 with CloudFront URL)
+        var userPoolClient = new UserPoolClient(this, "UserPoolClient", new UserPoolClientProps
+        {
+            UserPool = userPool,
+            AuthFlows = new AuthFlow { UserPassword = true, UserSrp = true },
+            OAuth = new OAuthSettings
+            {
+                Flows = new OAuthFlows { AuthorizationCodeGrant = true },
+                Scopes = [
+                    OAuthScope.EMAIL,
+                    OAuthScope.OPENID,
+                    OAuthScope.PROFILE,
+                    OAuthScope.ResourceServer(resourceServer, readScope),
+                    OAuthScope.ResourceServer(resourceServer, writeScope)
+                ],
+                CallbackUrls = ["http://localhost:3000/"]  // Placeholder, updated in part 2
+            },
+            GenerateSecret = false
+        });
+
+        // JWT Authorizer
+        var authorizer = new HttpJwtAuthorizer("CognitoAuthorizer",
+            $"https://cognito-idp.{Region}.amazonaws.com/{userPool.UserPoolId}",
+            new HttpJwtAuthorizerProps
+            {
+                JwtAudience = [userPoolClient.UserPoolClientId]
+            });
+
+        // HTTP API with JWT authorization
+        var api = new HttpApi(this, "NotesApi", new HttpApiProps
+        {
+            ApiName = "Smart Note Organizer API",
+            DefaultAuthorizer = authorizer,
+            DefaultAuthorizationScopes = ["notes-api/read", "notes-api/write"],
+            CorsPreflight = new CorsPreflightOptions
+            {
+                AllowOrigins = ["*"],
+                AllowMethods = [CorsHttpMethod.GET, CorsHttpMethod.POST, CorsHttpMethod.OPTIONS],
+                AllowHeaders = ["Content-Type", "Authorization"]
+            }
+        });
+
+        // API Routes with scope-based authorization
+        api.AddRoutes(new AddRoutesOptions
+        {
+            Path = "/notes",
+            Methods = [HttpMethod.GET],
+            Integration = new HttpLambdaIntegration("GetNotesIntegration", lambdaFunction),
+            AuthorizationScopes = ["notes-api/read"]
+        });
+
+        api.AddRoutes(new AddRoutesOptions
+        {
+            Path = "/notes",
+            Methods = [HttpMethod.POST],
+            Integration = new HttpLambdaIntegration("CreateNoteIntegration", lambdaFunction),
+            AuthorizationScopes = ["notes-api/write"]
+        });
+
+        // Outputs
+        _ = new CfnOutput(this, "ApiUrl", new CfnOutputProps { Value = api.Url ?? "" });
+        _ = new CfnOutput(this, "UserPoolId", new CfnOutputProps { Value = userPool.UserPoolId });
+        _ = new CfnOutput(this, "UserPoolClientId", new CfnOutputProps { Value = userPoolClient.UserPoolClientId });
+        _ = new CfnOutput(this, "CognitoLoginUrl", new CfnOutputProps { Value = $"https://{userPoolDomain.DomainName}.auth.{Region}.amazoncognito.com" });
+    }
+}
 ```
 
-Now, update `src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj` to enable WebAssembly AOT:
+The CDK uses Docker bundling to build the Native AOT Lambda inside a Linux container. This solves the cross-compilation challenge when developing on macOS. The Lambda is packaged as a ZIP file for optimal cold start performance.
 
-```xml
-<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <RunAOTCompilation>true</RunAOTCompilation>
-  </PropertyGroup>
-</Project>
+Create `infra/cdk.json`:
+
+```json
+{
+  "app": "dotnet run --project SmartNoteOrganizer.Infrastructure/SmartNoteOrganizer.Infrastructure.csproj"
+}
 ```
 
-## Implement Blazor UI with MudBlazor
+# Conclusion
+
+We've now built a blazingly fast serverless backend using .NET 10 Native AOT on AWS Lambda with ARM64/Graviton. The API integrates with Amazon Bedrock Nova Lite for AI-powered tag suggestions and stores data in DynamoDB using a single-table design. With JWT authentication via Cognito, the backend is secure and ready for production.
+
+In [part 2](https://www.ganhammar.se/posts/blazingly-fast-serverless-note-app-part-2), we'll build the Blazor WebAssembly frontend with MudBlazor for Material Design components, implement OAuth2 authentication, and deploy everything to AWS with CDK. The complete code is available in the [companion repository](https://github.com/ganhammar/smart-noter).

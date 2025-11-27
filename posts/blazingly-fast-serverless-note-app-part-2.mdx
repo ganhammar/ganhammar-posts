@@ -1,0 +1,571 @@
+---
+title: "Blazingly Fast Serverless Note App with Blazor, Amazon Bedrock and .NET 10 Native AOT"
+id: blazingly-fast-serverless-note-app-part-2
+date: 2026-11-27
+status: draft
+---
+
+# Blazingly Fast Serverless Note App - Part 2: Building the Frontend
+
+In [part 1](https://www.ganhammar.se/posts/blazingly-fast-serverless-note-app), we built the backend API with .NET 10 Native AOT on AWS Lambda, integrated Amazon Bedrock for AI-powered tag suggestions, and set up DynamoDB for storage. Now let's build the frontend using Blazor WebAssembly with WASM AOT compilation and MudBlazor for Material Design components.
+
+# Frontend Implementation
+
+## Bootstrapping the UI Project
+
+First, let's create the Blazor WebAssembly project:
+
+```bash
+# Frontend
+dotnet new blazorwasm -n SmartNoteOrganizer.UI -f net10.0 -o src/SmartNoteOrganizer.UI
+
+# Add to solution
+dotnet sln add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj
+```
+
+Now add the required packages:
+
+```bash
+# UI
+dotnet add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj package MudBlazor
+
+# References
+dotnet add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj reference src/SmartNoteOrganizer.Shared/SmartNoteOrganizer.Shared.csproj
+```
+
+## Configure Blazor WebAssembly for AOT
+
+Before we jump into the UI project, make sure that you have the `wasm-tools` workload installed:
+
+```bash
+dotnet workload install wasm-tools
+```
+
+Now, update `src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj` to enable WebAssembly AOT:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RunAOTCompilation>true</RunAOTCompilation>
+  </PropertyGroup>
+</Project>
+```
+
+## Add Authentication to the UI Project
+
+The UI will use Cognito's Hosted UI with OAuth2 authorization code flow. Create `wwwroot/appsettings.json`:
+
+```json
+{
+  "Api": {
+    "BaseUrl": "http://localhost:5000"
+  },
+  "Auth": {
+    "CognitoUrl": "",
+    "ClientId": "",
+    "AppUrl": ""
+  }
+}
+```
+
+These values will be populated by the deployment script with actual CDK outputs.
+
+Now update `Program.cs` to load configuration and register authentication services:
+
+```csharp
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using SmartNoteOrganizer.UI;
+using SmartNoteOrganizer.UI.Services;
+using System.Net.Http.Json;
+using MudBlazor.Services;
+
+var builder = WebAssemblyHostBuilder.CreateDefault(args);
+builder.RootComponents.Add<App>("#app");
+builder.RootComponents.Add<HeadOutlet>("head::after");
+
+// Load configuration
+var http = new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) };
+var config = await http.GetFromJsonAsync<AppConfig>("appsettings.json");
+
+// Register services
+builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(config!.Api.BaseUrl) });
+builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddSingleton(new AuthOptions(config!.Auth.CognitoUrl, config.Auth.ClientId, config.Auth.AppUrl));
+builder.Services.AddMudServices(config =>
+{
+    config.SnackbarConfiguration.PositionClass = MudBlazor.Defaults.Classes.Position.BottomRight;
+    config.SnackbarConfiguration.VisibleStateDuration = 2000;
+    config.SnackbarConfiguration.ShowTransitionDuration = 200;
+    config.SnackbarConfiguration.HideTransitionDuration = 200;
+});
+
+await builder.Build().RunAsync();
+
+record AppConfig(ApiConfig Api, AuthConfig Auth);
+record ApiConfig(string BaseUrl);
+record AuthConfig(string CognitoUrl, string ClientId, string AppUrl);
+```
+
+Create `Services/AuthService.cs` to handle the OAuth2 flow:
+
+```csharp
+using System.Net.Http.Json;
+using System.Text.Json.Serialization;
+using System.Web;
+using Microsoft.JSInterop;
+
+namespace SmartNoteOrganizer.UI.Services;
+
+public record AuthOptions(string CognitoUrl, string ClientId, string AppUrl);
+
+public interface IAuthService
+{
+    bool IsAuthenticated { get; }
+    string? AccessToken { get; }
+    Task InitializeAsync();
+    Task LoginAsync();
+    Task LogoutAsync();
+}
+
+public class AuthService(IJSRuntime jsRuntime, HttpClient httpClient, AuthOptions authOptions) : IAuthService
+{
+    private string? _accessToken;
+
+    public bool IsAuthenticated => !string.IsNullOrEmpty(_accessToken);
+    public string? AccessToken => _accessToken;
+
+    public async Task InitializeAsync()
+    {
+        _accessToken = await jsRuntime.InvokeAsync<string?>("sessionStorage.getItem", "accessToken");
+
+        var url = await jsRuntime.InvokeAsync<string>("eval", "window.location.href");
+
+        if (url.Contains("?code="))
+        {
+            await HandleCallbackAsync(url);
+        }
+    }
+
+    public async Task LoginAsync()
+    {
+        var redirectUri = Uri.EscapeDataString($"{authOptions.AppUrl}/");
+        var scopes = Uri.EscapeDataString("email openid profile notes-api/read notes-api/write");
+        var loginUrl = $"{authOptions.CognitoUrl}/oauth2/authorize?" +
+                      $"client_id={authOptions.ClientId}&" +
+                      $"response_type=code&" +
+                      $"scope={scopes}&" +
+                      $"redirect_uri={redirectUri}";
+
+        await jsRuntime.InvokeVoidAsync("eval", $"window.location.href = '{loginUrl}'");
+    }
+
+    public async Task LogoutAsync()
+    {
+        _accessToken = null;
+        await jsRuntime.InvokeVoidAsync("sessionStorage.removeItem", "accessToken");
+    }
+
+    private async Task HandleCallbackAsync(string url)
+    {
+        var uri = new Uri(url);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+        var code = query["code"];
+
+        if (string.IsNullOrEmpty(code)) return;
+
+        try
+        {
+            var tokenRequest = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("grant_type", "authorization_code"),
+                new KeyValuePair<string, string>("client_id", authOptions.ClientId),
+                new KeyValuePair<string, string>("code", code),
+                new KeyValuePair<string, string>("redirect_uri", $"{authOptions.AppUrl}/")
+            });
+
+            var response = await httpClient.PostAsync($"{authOptions.CognitoUrl}/oauth2/token", tokenRequest);
+            response.EnsureSuccessStatusCode();
+
+            var tokenResponse = await response.Content.ReadFromJsonAsync<TokenResponse>();
+            if (tokenResponse != null)
+            {
+                _accessToken = tokenResponse.AccessToken;
+                await jsRuntime.InvokeVoidAsync("sessionStorage.setItem", "accessToken", _accessToken);
+
+                await jsRuntime.InvokeVoidAsync("eval", $"window.history.replaceState(null, '', '{authOptions.AppUrl}/')");
+            }
+        }
+        catch
+        {
+            // Token exchange failed
+        }
+    }
+}
+
+public record TokenResponse(
+    [property: JsonPropertyName("access_token")] string AccessToken,
+    [property: JsonPropertyName("id_token")] string IdToken,
+    [property: JsonPropertyName("token_type")] string TokenType,
+    [property: JsonPropertyName("expires_in")] int ExpiresIn
+);
+```
+
+The service uses OAuth2 authorization code flow and stores the access token in `sessionStorage`, which persists on page refresh but clears when the tab closes. After the OAuth callback, it cleans up the URL by removing the authorization code.
+
+## Implement Blazor UI with MudBlazor
+
+MudBlazor provides Material Design components without custom CSS. First, add MudBlazor to `_Imports.razor`:
+
+```razor
+@using MudBlazor
+```
+
+Update `wwwroot/index.html` to include MudBlazor assets:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Note Organizer</title>
+    <base href="/" />
+    <link href="css/app.css" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link href="_content/MudBlazor/MudBlazor.min.css" rel="stylesheet" />
+</head>
+<body>
+    <div id="app"></div>
+    <script src="_framework/blazor.webassembly.js"></script>
+    <script src="_content/MudBlazor/MudBlazor.min.js"></script>
+</body>
+</html>
+```
+
+Create `Layout/MainLayout.razor` with MudBlazor components:
+
+```razor
+@inherits LayoutComponentBase
+
+<MudThemeProvider />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<MudLayout>
+    <MudAppBar Elevation="1">
+        <MudText Typo="Typo.h5" Class="ml-3">Smart Note Organizer</MudText>
+        <MudSpacer />
+    </MudAppBar>
+    <MudMainContent>
+        <MudContainer MaxWidth="MaxWidth.Large" Class="my-6">
+            @Body
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+```
+
+Finally, create `Pages/Notes.razor` with full CRUD and authentication:
+
+```razor
+@page "/"
+@using SmartNoteOrganizer.Shared
+@using SmartNoteOrganizer.UI.Services
+@inject HttpClient Http
+@inject IAuthService AuthService
+@inject ISnackbar Snackbar
+
+<PageTitle>Smart Note Organizer</PageTitle>
+
+@if (isInitializing)
+{
+    <MudPaper Class="pa-8 ma-4" Elevation="3">
+        <MudStack Spacing="4" AlignItems="AlignItems.Center">
+            <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Large" />
+            <MudText Typo="Typo.h6" Color="Color.Secondary">Loading...</MudText>
+        </MudStack>
+    </MudPaper>
+}
+else if (!AuthService.IsAuthenticated)
+{
+    <MudPaper Class="pa-8 ma-4" Elevation="3">
+        <MudStack Spacing="4" AlignItems="AlignItems.Center">
+            <MudText Typo="Typo.h4">Welcome to Smart Note Organizer</MudText>
+            <MudText Typo="Typo.body1" Color="Color.Secondary">AI-powered note taking with automatic tag suggestions</MudText>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Large" OnClick="LoginAsync">
+                Login to Get Started
+            </MudButton>
+        </MudStack>
+    </MudPaper>
+}
+else
+{
+    <MudStack Spacing="4">
+        <MudPaper Class="pa-4" Elevation="2">
+            <MudStack Spacing="3">
+                <MudText Typo="Typo.h6">Create New Note</MudText>
+                <MudTextField @bind-Value="noteContent"
+                              Label="Note Content"
+                              Variant="Variant.Outlined"
+                              Lines="4"
+                              Placeholder="Enter your note content..." />
+                <MudStack Row="true" Spacing="2">
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Primary"
+                               OnClick="CreateNoteAsync"
+                               Disabled="@isLoading"
+                               StartIcon="@Icons.Material.Filled.Add">
+                        @(isLoading ? "Creating..." : "Create Note")
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined"
+                               Color="Color.Secondary"
+                               OnClick="LoadNotesAsync"
+                               Disabled="@isLoading"
+                               StartIcon="@Icons.Material.Filled.Refresh">
+                        Refresh
+                    </MudButton>
+                    <MudSpacer />
+                    <MudButton Variant="Variant.Text"
+                               Color="Color.Default"
+                               OnClick="Logout"
+                               StartIcon="@Icons.Material.Filled.Logout">
+                        Logout
+                    </MudButton>
+                </MudStack>
+            </MudStack>
+        </MudPaper>
+
+        <MudText Typo="Typo.h6" Class="mt-4">Your Notes</MudText>
+
+        @if (notes.Count == 0)
+        {
+            <MudPaper Class="pa-8" Elevation="0">
+                <MudText Align="Align.Center" Color="Color.Secondary">
+                    No notes yet. Create your first note above!
+                </MudText>
+            </MudPaper>
+        }
+        else
+        {
+            <MudStack Spacing="3">
+                @foreach (var note in notes)
+                {
+                    <MudCard Elevation="2">
+                        <MudCardContent>
+                            <MudText Typo="Typo.body1">@note.Content</MudText>
+                            <MudStack Row="true" Spacing="1" Class="mt-3">
+                                @foreach (var tag in note.SuggestedTags)
+                                {
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Secondary">@tag</MudChip>
+                                }
+                            </MudStack>
+                        </MudCardContent>
+                        <MudCardActions>
+                            <MudText Typo="Typo.caption" Color="Color.Secondary">
+                                Created: @note.CreatedAt.ToString("g")
+                            </MudText>
+                        </MudCardActions>
+                    </MudCard>
+                }
+            </MudStack>
+        }
+    </MudStack>
+}
+
+@code {
+    private string noteContent = "";
+    private List<NoteResponse> notes = new();
+    private bool isLoading;
+    private bool isInitializing = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await AuthService.InitializeAsync();
+        if (AuthService.IsAuthenticated)
+        {
+            await LoadNotesAsync();
+        }
+        isInitializing = false;
+    }
+
+    private async Task LoginAsync()
+    {
+        await AuthService.LoginAsync();
+    }
+
+    private async Task Logout()
+    {
+        await AuthService.LogoutAsync();
+        notes.Clear();
+        Snackbar.Add("Logged out successfully", Severity.Info);
+        StateHasChanged();
+    }
+
+    private async Task CreateNoteAsync()
+    {
+        if (string.IsNullOrWhiteSpace(noteContent))
+        {
+            Snackbar.Add("Please enter note content", Severity.Warning);
+            return;
+        }
+
+        isLoading = true;
+
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, "notes")
+            {
+                Content = JsonContent.Create(new CreateNoteRequest(noteContent))
+            };
+            request.Headers.Add("Authorization", $"Bearer {AuthService.AccessToken}");
+
+            var response = await Http.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+
+            var note = await response.Content.ReadFromJsonAsync<NoteResponse>();
+            if (note != null)
+            {
+                notes.Insert(0, note);
+                noteContent = "";
+                Snackbar.Add($"Note created with tags: {string.Join(", ", note.SuggestedTags)}", Severity.Success);
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private async Task LoadNotesAsync()
+    {
+        isLoading = true;
+
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, "notes");
+            request.Headers.Add("Authorization", $"Bearer {AuthService.AccessToken}");
+
+            var response = await Http.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+
+            var loadedNotes = await response.Content.ReadFromJsonAsync<Note[]>();
+            if (loadedNotes != null)
+            {
+                notes = loadedNotes.Select(n => new NoteResponse(
+                    n.Id, n.Content, n.Tags, n.Tags, n.CreatedAt
+                )).ToList();
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Error: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+}
+```
+
+The page shows a loading spinner during authentication initialization. The AI-generated tags are displayed as chips, and snackbar notifications provide feedback for operations.
+
+## Update The Stack for Frontend
+
+Now we need to add the frontend infrastructure to our CDK stack. In `infra/SmartNoteOrganizer.Infrastructure/SmartNoteStack.cs`, add the S3 and CloudFront resources after the Lambda function and before the User Pool Client:
+
+```csharp
+// Add these using statements at the top
+using Amazon.CDK.AWS.S3;
+using Amazon.CDK.AWS.CloudFront;
+using Amazon.CDK.AWS.CloudFront.Origins;
+```
+
+Then add the frontend infrastructure after the Bedrock permissions:
+
+```csharp
+        // Grant permissions
+        notesTable.GrantReadWriteData(lambdaFunction);
+        lambdaFunction.AddToRolePolicy(new PolicyStatement(new PolicyStatementProps
+        {
+            Effect = Effect.ALLOW,
+            Actions = ["bedrock:InvokeModel"],
+            Resources = ["*"]
+        }));
+
+        // S3 bucket for static website hosting
+        var frontendBucket = new Bucket(this, "FrontendBucket", new BucketProps
+        {
+            WebsiteIndexDocument = "index.html",
+            PublicReadAccess = true,
+            BlockPublicAccess = new BlockPublicAccess(new BlockPublicAccessOptions
+            {
+                BlockPublicAcls = false,
+                BlockPublicPolicy = false,
+                IgnorePublicAcls = false,
+                RestrictPublicBuckets = false
+            }),
+            RemovalPolicy = RemovalPolicy.DESTROY,
+            AutoDeleteObjects = true
+        });
+
+        // CloudFront distribution
+        var distribution = new Distribution(this, "Distribution", new DistributionProps
+        {
+            DefaultBehavior = new BehaviorOptions
+            {
+                Origin = new S3StaticWebsiteOrigin(frontendBucket),
+                ViewerProtocolPolicy = ViewerProtocolPolicy.REDIRECT_TO_HTTPS
+            },
+            DefaultRootObject = "index.html"
+        });
+
+        // Update User Pool Client with CloudFront callback URL
+        var userPoolClient = new UserPoolClient(this, "UserPoolClient", new UserPoolClientProps
+        {
+            UserPool = userPool,
+            AuthFlows = new AuthFlow { UserPassword = true, UserSrp = true },
+            OAuth = new OAuthSettings
+            {
+                Flows = new OAuthFlows { AuthorizationCodeGrant = true },
+                Scopes = [
+                    OAuthScope.EMAIL,
+                    OAuthScope.OPENID,
+                    OAuthScope.PROFILE,
+                    OAuthScope.ResourceServer(resourceServer, readScope),
+                    OAuthScope.ResourceServer(resourceServer, writeScope)
+                ],
+                CallbackUrls = [$"https://{distribution.DistributionDomainName}/"]
+            },
+            GenerateSecret = false
+        });
+```
+
+Finally, add the frontend outputs after the existing outputs:
+
+```csharp
+        // Outputs
+        _ = new CfnOutput(this, "ApiUrl", new CfnOutputProps { Value = api.Url ?? "" });
+        _ = new CfnOutput(this, "UserPoolId", new CfnOutputProps { Value = userPool.UserPoolId });
+        _ = new CfnOutput(this, "UserPoolClientId", new CfnOutputProps { Value = userPoolClient.UserPoolClientId });
+        _ = new CfnOutput(this, "CognitoLoginUrl", new CfnOutputProps { Value = $"https://{userPoolDomain.DomainName}.auth.{Region}.amazoncognito.com" });
+        _ = new CfnOutput(this, "FrontendUrl", new CfnOutputProps { Value = $"https://{distribution.DistributionDomainName}" });
+        _ = new CfnOutput(this, "BucketName", new CfnOutputProps { Value = frontendBucket.BucketName });
+        _ = new CfnOutput(this, "DistributionId", new CfnOutputProps { Value = distribution.DistributionId });
+```
+
+The S3 bucket is configured for static website hosting, and CloudFront provides global CDN distribution with HTTPS. The Cognito callback URL now points to the CloudFront domain instead of localhost.
+
+# Conclusion
+
+With the frontend complete, we now have a full-stack serverless application built entirely in C#. The Blazor WebAssembly frontend with WASM AOT compilation loads quickly and provides a responsive Material Design interface. Combined with the Native AOT Lambda backend from part 1, the application delivers blazingly fast performance with zero idle costs.
+
+The complete code is available in the [companion repository](https://github.com/ganhammar/smart-noter), including the full CDK infrastructure definition and detailed setup instructions.
