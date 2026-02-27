@@ -3,7 +3,7 @@ title: Building a Centaur Chess App with AgentCore Runtime and Strands Agents
 id: building-a-centaur-chess-app-with-agentcore-runtime-and-strands-agent
 canonical: https://elva-group.com/blog/building-a-centaur-chess-app-with-agentcore-runtime-and-strands-agent/
 date: 2026-02-27
-status: draft
+status: published
 ---
 
 # Building a Centaur Chess App with AgentCore Runtime and Strands Agents
