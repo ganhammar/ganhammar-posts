@@ -22,7 +22,7 @@ A chess game where a human plays White, assisted by an AI advisor, against an AI
 
 Here's the architecture:
 
-![Architecture diagram](./centaur-chess-architecture.png)
+![Architecture diagram](./centaur-chess-architecture.gif)
 
 The Next.js API routes call AgentCore Runtime directly using the AWS SDK, which handles authentication automatically via the local credential chain.
 
