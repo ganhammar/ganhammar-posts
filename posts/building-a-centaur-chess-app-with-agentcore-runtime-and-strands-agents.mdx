@@ -22,7 +22,7 @@ A chess game where a human plays White, assisted by an AI advisor, against an AI
 
 Here's the architecture:
 
-![Architecture diagram](./centaur-chess-architecture.gif)
+![Architecture diagram](./assets/centaur-chess-architecture.gif)
 
 The Next.js API routes call AgentCore Runtime directly using the AWS SDK, which handles authentication automatically via the local credential chain.
 
@@ -36,7 +36,7 @@ The turn flow:
 6. The opponent picks a move, validates it by calling the legality agent directly (agent-to-agent), and responds with the validated move and resulting position
 7. Repeat
 
-![The game in action](./centaur-chess-game-screenshot.png)
+![The game in action](./assets/centaur-chess-game-screenshot.png)
 
 ## AgentCore Runtime
 
@@ -368,7 +368,7 @@ export async function POST(req: Request) {
 }
 ```
 
-The API routes now accept a piece map and game metadata instead of a FEN string. A shared `pieceMapToFen` utility converts the client-side representation to FEN for the agent prompt. This keeps the frontend free of any chess library dependency.
+The API routes accept a piece map and game metadata from the frontend. A shared `pieceMapToFen` utility converts this to FEN for the agent prompt, keeping the frontend free of any chess library dependency.
 
 The `runtimeSessionId` is worth noting. We generate one per game and pass it with every request. AgentCore uses this to route requests to the same microVM and maintain conversation context. This gives us session memory without writing any memory management code.
 
@@ -386,7 +386,7 @@ We learned a lot building this, but let's be direct about the limitations.
 
 **Cost is worth mentioning.** Each agent session runs in a dedicated microVM that stays alive until the idle timeout (default 15 minutes). For a chess game with pauses between moves, that means we're paying for idle time within each session. For a teaching example this is fine, but for production we'd want to understand the pricing model and compare it against Lambda (pay-per-invocation) or Fargate (pay-per-task). AgentCore is still in preview, so pricing details may evolve.
 
-**What's promising.** The deployment model is genuinely simpler than the alternatives. Going from "agent code in a Docker image" to "running in the cloud with session management" takes one CDK construct. The container contract (`/ping` + `/invocations`) is simple enough that migrating an existing agent to AgentCore is straightforward. And the Strands tool pattern (Zod schema in, typed callback out, model decides when to call) is the cleanest tool-definition API we've used in a TypeScript agent framework. The three agents in this project show the range: a tool-equipped advisor, a self-validating opponent that composes with another agent, and a pure validation agent. Same SDK, same deployment pattern, different designs for different jobs.
+**What's promising.** Going from "agent code in a Docker image" to "running in the cloud with session management" takes one CDK construct. The container contract (`/ping` + `/invocations`) is simple, and the Strands tool pattern (Zod schema in, typed callback out, model decides when to call) keeps tool definitions clean. The three agents in this project show the range: a tool-equipped advisor, a self-validating opponent that composes with another agent, and a pure validation agent. Same SDK, same deployment pattern, different designs for different jobs.
 
 ## Companion Repository
 
