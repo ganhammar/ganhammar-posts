@@ -19,6 +19,12 @@ Building native AOT applications in Dotnet comes with its own set of trade-offs 
 
 2. **Compile Time**: AOT compilation takes longer than JIT compilation, as it needs to compile all code upfront. This can slow down your build and deployment process.
 
+> [!TIP]
+> The fastest way to find out whether AOT is realistic for an existing
+> project is to publish with `-p:PublishAot=true` and read the trim
+> warnings. They name the reflection your dependencies rely on before
+> you have committed to anything.
+
 3. **Reflection and Dynamic Loading**: AOT has limitations when it comes to reflection and dynamic loading. If your application heavily relies on these features, you may need to make significant changes to your code or consider if AOT is the right choice for your application.
 
 4. **Cross-Platform Compatibility**: While dotnet is cross-platform, AOT-compiled applications are not. An AOT-compiled application is specific to the platform it was compiled on, which can limit its portability.
@@ -102,6 +108,11 @@ public class Function
 # Defining the Stack
 
 Since GitHub actions don't natively support ARM64 runners and dotnet [doesn't support QEMU](https://github.com/dotnet/core/blob/main/release-notes/8.0/supported-os.md#qemu), we're going to target `linux-x64`. We also need to make sure to set the runtime to `PROVIDED_AL2023`.
+
+> [!NOTE]
+> This is the only reason to stay on x64. Building on an ARM64 runner
+> lets you target `linux-arm64` and switch to `Architecture.ARM_64`,
+> which is cheaper per invocation.
 
 ```c#
 new Function(this, "GetFunction", new FunctionProps

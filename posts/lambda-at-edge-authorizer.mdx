@@ -200,6 +200,11 @@ export const handler = async (event: CloudFrontRequestEvent) => {
 
 To deploy our infrastructure, we will use [AWS SAM](https://aws.amazon.com/serverless/sam/).  For this project, we will deploy our CloudFront distribution in eu-north-1, but since we want to use the authorizer function as an edge function, it must be deployed in `us-east-1`, which means that we will need two template files: one for the distribution and API function, and one for the authorizer function. Let's start defining the authorizer infrastructure in `template-authorizer.yml`:
 
+> [!NOTE]
+> Removing an edge function later is also a two-step affair. CloudFront
+> has to replicate the deletion to every location before the stack will
+> come down, and that can take the better part of an hour.
+
 ```yml
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: 'AWS::Serverless-2016-10-31'

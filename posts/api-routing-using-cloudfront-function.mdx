@@ -13,6 +13,11 @@ CloudFront is [limited to 25 cache behaviors per distribution](https://docs.aws.
 
 We will be using AWS SAM to define our infrastructure for this project. The stack will contain a CloudFront Distribution with a default origin that has a CloudFront Function acting as the edge router using the `viewer-request` event type. The function must use the JavaScript runtime 2.0.
 
+> [!NOTE]
+> Origin modification is the reason for the 2.0 runtime specifically.
+> The `cloudfront` module that exposes `updateRequestOrigin` does not
+> exist in the 1.0 runtime.
+
 ### Modifying the Origin
 
 Modifying the origin is done through the helper method `updateRequestOrigin`, which is exported in the CloudFront Functions module. In the example below, we're changing the request origin to target an API Gateway instance. The helper method can also be used to update other origin settings, such as changing the Origin Access Control (OAC). See the [documentation](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/helper-functions-origin-modification.html) for all settings.

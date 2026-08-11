@@ -113,6 +113,11 @@ new CfnUserPoolGroup(this, "UserGroup", {
 
 Next, we will define the Pre Token Generation Lambda (pre-token-generation.ts), which we store in a new folder called `handlers` in the `lib`-folder. The type definitions for Pre Token Generation V2 have not yet been included in the `aws-lambda`-package, so it must be manually defined, they can be found [here](https://github.com/ganhammar/fine-grained-permissions-with-amazon-cognito/blob/main/lib/handlers/pre-token-generation.ts). I have excluded them in the below code:
 
+> [!NOTE]
+> Worth re-checking before you copy the definitions across: once these
+> land in `@types/aws-lambda`, the local declarations become a
+> conflicting duplicate rather than a missing piece.
+
 ```typescript
 import { BatchGetItemCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 

@@ -374,6 +374,11 @@ The `runtimeSessionId` is worth noting. We generate one per game and pass it wit
 
 Sessions can persist for up to 8 hours with a configurable idle timeout (default 15 minutes). If a session terminates, the microVM is cleaned up and a new request with the same ID creates a fresh environment. For a chess game that typically lasts minutes, this is plenty.
 
+> [!NOTE]
+> Billing follows the session, not the request. The microVM stays alive
+> until the idle timeout expires, so a game with long pauses pays for
+> more idle time than compute.
+
 ## Tradeoffs
 
 We learned a lot building this, but let's be direct about the limitations.

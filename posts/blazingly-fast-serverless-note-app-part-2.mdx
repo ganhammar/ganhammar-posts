@@ -37,6 +37,11 @@ dotnet add src/SmartNoteOrganizer.UI/SmartNoteOrganizer.UI.csproj reference src/
 
 Before we jump into the UI project, make sure that you have the `wasm-tools` workload installed:
 
+> [!NOTE]
+> The workload is tied to the SDK feature band, so installing it once
+> is not enough. After an SDK upgrade it has to be installed again for
+> the new band.
+
 ```bash
 dotnet workload install wasm-tools
 ```
