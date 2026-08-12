@@ -52,7 +52,7 @@ The second is the workload access token. When the browser invokes the agent, Age
 > JWT authorizer configured on the runtime, the runtime calls it for
 > you and your code only ever sees the result.
 
-The third is the delegated token, the one this post is named after. The agent hands its workload token to AgentCore Identity by calling `GetResourceOauth2Token`, asking for a token for the expense API with the expense scopes. AgentCore Identity acts as the OAuth client here. It holds the client secret for a second Cognito app client, runs the authorization code flow against the user pool, and stores the resulting token in its token vault, keyed to alice. On later calls the vault answers directly.
+The third is the delegated token, the one this post is named after. The agent hands its workload token to AgentCore Identity by calling `GetResourceOauth2Token`, asking for a token for the expense API with the expense scopes. AgentCore Identity acts as the OAuth client here. It holds the client secret for a second Cognito app client, runs the authorization code flow against the user pool, and stores the resulting token in the token vault, a managed store that comes with AgentCore Identity, keyed to alice. On later calls the vault answers directly.
 
 The first time alice asks, the vault is empty and there is nothing to hand out. Instead, AgentCore Identity generates an authorization URL, and the agent relays it into the chat. Alice clicks it and consents. The consent by itself does not finish the flow. The redirect lands back on our application with a session identifier, and the application must call `CompleteResourceTokenAuth` before AgentCore Identity fetches and stores the token. That step gets its own section.
 
@@ -94,7 +94,18 @@ sequenceDiagram
 
 The two Cognito app clients are the load-bearing wall of this design. The login client proves who alice is. The agent client holds what the agent may be granted on her behalf, the expense scopes, behind a client secret that only AgentCore Identity ever sees. The agent's power comes entirely from the vaulted delegated token, which exists only because alice consented, is scoped to what the client allows, and dies with her grant.
 
+> [!NOTE]
+> The client secret on its own grants nothing. The agent client only
+> allows the authorization code flow, so tokens exist only downstream
+> of a signed-in user's consent, and never carry more than that user's
+> grant.
+
 One distinction does a lot of quiet work in the expense server. Scopes describe what a client may request on a user's behalf, and Cognito grants them per client, not per user. Whether alice may actually approve expenses is a property of alice, not of the client, and it lives in her `cognito:groups` claim. The approve tool therefore requires both the approve scope on the token and the managers group on the user behind it. Delegation controls how far the agent may reach, the group controls how far the human could reach in the first place.
+
+> [!NOTE]
+> Cognito only includes `cognito:groups` in access tokens granted with
+> the `openid` scope. Request custom scopes alone and the claim is
+> silently omitted.
 
 ## The Expense MCP Server
 
@@ -138,7 +149,14 @@ builder.Services
     });
 ```
 
-Unauthenticated requests get a 401 with a `WWW-Authenticate` header pointing at the metadata endpoint, which is how spec-compliant MCP clients discover the authorization server. Lambda function URLs rename that header to `x-amzn-remapped-www-authenticate`, though. Our agent gets its tokens from AgentCore Identity instead, so nothing in this system reads the challenge, but an external MCP client pointed straight at the server will trip on it.
+Unauthenticated requests get a 401 with a `WWW-Authenticate` header pointing at the metadata endpoint, which is how spec-compliant MCP clients discover the authorization server.
+
+> [!NOTE]
+> Lambda function URLs rename the header to
+> `x-amzn-remapped-www-authenticate`. Nothing in this system reads the
+> challenge, since the agent gets its tokens from AgentCore Identity,
+> but an external MCP client pointed straight at the server will trip
+> on it.
 
 Inside the tools, the scope and group distinction from earlier becomes two small guards, and approving requires both:
 
@@ -166,7 +184,7 @@ void RequireGroup(string group)
 }
 ```
 
-A thrown `McpException` reaches the model as a tool error, which is what lets the agent relay a refusal in plain language instead of hallucinating around it. The server runs as a Native AOT binary on `provided.al2023` behind a function URL, and the whole stack compiles with zero trim warnings, MCP SDK and JwtBearer included. The build pipeline is in the repository.
+A thrown `McpException` reaches the model as a tool error, which is what lets the agent relay a refusal in plain language instead of hallucinating around it. The server runs as a Native AOT binary on `provided.al2023` behind a function URL.
 
 ## The Agent
 
@@ -188,33 +206,64 @@ app.MapPost("/invocations", async (
 });
 ```
 
-The broker is one call to AgentCore Identity. Either the vault has a token for this user and returns it, or it returns an authorization URL for the consent flow:
+The broker asks AgentCore Identity for the user's token. Either the vault holds a grant and returns it, or the response carries an authorization URL for the consent flow. One wrinkle is handled inline, since the vault does not do it for us: if the stored grant no longer covers the scopes we request, the broker forces a fresh consent.
 
 ```csharp
 public class TokenBroker
 {
+    static readonly string Provider =
+        Environment.GetEnvironmentVariable("CREDENTIAL_PROVIDER") ?? "cognito-expenses";
+    // openid is required for Cognito to include identity claims, such as
+    // cognito:groups, in the access token
     static readonly List<string> Scopes =
-        ["expenses/read", "expenses/write", "expenses/approve"];
+        ["openid", "expenses/read", "expenses/write", "expenses/approve"];
+    // Where the user's browser lands after granting consent (session binding)
+    static readonly string ReturnUrl =
+        Environment.GetEnvironmentVariable("APP_URL") ?? "http://localhost:4000/";
 
     readonly AmazonBedrockAgentCoreClient _client = new();
 
     public async Task<(string? UserToken, string? AuthorizationUrl)> GetUserToken(
         string workloadToken)
     {
-        var response = await _client.GetResourceOauth2TokenAsync(
-            new GetResourceOauth2TokenRequest
-            {
-                WorkloadIdentityToken = workloadToken,
-                ResourceCredentialProviderName = "cognito-expenses",
-                Scopes = Scopes,
-                Oauth2Flow = Oauth2FlowType.USER_FEDERATION,
-                ResourceOauth2ReturnUrl = ReturnUrl,
-            });
+        var response = await Request(workloadToken, force: false);
+
+        // The vault returns the stored grant even if the requested scopes
+        // have widened since the user consented; a fresh consent is needed
+        if (response.AccessToken is { } token && !CoversScopes(token))
+            response = await Request(workloadToken, force: true);
 
         return (response.AccessToken, response.AuthorizationUrl);
     }
+
+    Task<GetResourceOauth2TokenResponse> Request(string workloadToken, bool force) =>
+        _client.GetResourceOauth2TokenAsync(new GetResourceOauth2TokenRequest
+        {
+            WorkloadIdentityToken = workloadToken,
+            ResourceCredentialProviderName = Provider,
+            Scopes = Scopes,
+            Oauth2Flow = Oauth2FlowType.USER_FEDERATION,
+            ResourceOauth2ReturnUrl = ReturnUrl,
+            ForceAuthentication = force,
+        });
+
+    static bool CoversScopes(string token)
+    {
+        var payload = token.Split('.')[1].Replace('-', '+').Replace('_', '/');
+        using var claims = JsonDocument.Parse(
+            Convert.FromBase64String(payload.PadRight((payload.Length + 3) / 4 * 4, '=')));
+        var granted = claims.RootElement.TryGetProperty("scope", out var scope)
+            ? scope.GetString()!.Split(' ')
+            : [];
+        return Scopes.All(granted.Contains);
+    }
 }
 ```
+
+> [!NOTE]
+> This matters after launch too. Widening the agent's scopes does not
+> invalidate existing grants, so every returning user keeps the narrow
+> token until something forces a new consent.
 
 > [!NOTE]
 > `USER_FEDERATION` is the three-legged flow, where a user grants the
@@ -236,7 +285,12 @@ await using var mcp = await McpClient.CreateAsync(new HttpClientTransport(new()
 }));
 ```
 
-The unconsented path is worth a design note. Returning the authorization URL for every message means a user who says "hi" gets an authorization ceremony. Instead, `RunWithoutAccess` runs the model with no tools and puts the link in the system prompt, with instructions to surface it only when the request actually needs expense access. The model decides relevance. As a practical footnote, Nova models interleave `<thinking>` blocks into text output, so the agent strips those before returning anything.
+Returning the authorization URL for every message would mean a user who says "hi" gets an authorization ceremony. Instead, `RunWithoutAccess` runs the model with no tools and puts the link in the system prompt, with instructions to surface it only when the request actually needs expense access. The model decides relevance.
+
+> [!NOTE]
+> Nova models interleave `<thinking>` blocks into their text output.
+> The agent strips those before returning a reply, since they are
+> reasoning scaffolding rather than an answer.
 
 ## Closing the Loop: Session Binding
 
@@ -271,7 +325,7 @@ The frontend's part is small. When the page loads with a `session_id` in the que
 
 ## Deploying It
 
-The AgentCore constructs recently graduated into stable `aws-cdk-lib`, and the identity pieces are small. Inbound auth on the runtime is one line, and the credential provider is a real CloudFormation resource that takes the agent client's credentials and the user pool's endpoints:
+The [AgentCore constructs](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_bedrockagentcore-readme.html) recently graduated into stable `aws-cdk-lib`, and the identity pieces are small. Inbound auth on the runtime is one line, and the credential provider is a real CloudFormation resource that takes the agent client's credentials and the user pool's endpoints:
 
 ```csharp
 var runtime = new AgentRuntime(this, "AgentRuntime", new RuntimeProps
@@ -314,36 +368,63 @@ A few things the error messages will not lead you to gracefully:
 - The runtime requires the image to be a single OCI manifest. Classic `docker build` pushes a Docker v2 manifest that passes ECR, CloudFormation, and the control plane, then fails at session start with a 424 and empty logs. Build with `docker buildx --provenance=false --sbom=false`.
 - Set a `WORKDIR` in the image. With content root `/`, the ASP.NET configuration file watcher walks the entire filesystem of the microVM and the container never comes up, with the same silent 424.
 
-The binaries are built as Native AOT on GitHub's arm64 runners, with no containers in the Lambda path and the link step pinned to the glibc that `provided.al2023` ships. That pipeline is a story of its own, and the workflow in the repository is the reference for now.
+The binaries are built as Native AOT on GitHub's arm64 runners, with no containers in the Lambda path and the link step pinned to the glibc that `provided.al2023` ships. The workflow in the [companion repository](https://github.com/ganhammar/who-approved-this) is the reference.
 
 ## The Payoff
 
-Alice asks the agent to submit a coffee expense. The first time, she gets the consent moment, grants access, and the expense appears. Then she tries her luck:
+Alice asks the agent to submit a coffee expense. The first time, she gets the consent link, grants access, and the expense appears. Then she tries her luck:
 
-{/* verify wording against the live app before publishing */}
-
-> **alice:** Approve the coffee expense
+> **alice:** Approve "Coffee" expense
 >
-> **agent:** I can't do that. Approving expenses requires being in the managers group, and you are not a member.
+> **agent:** I'm sorry, but I cannot approve the "Coffee" expense because I don't have the required manager permissions. Please ask a manager to approve this expense.
 
 The agent did not decide this. The approve tool rejected the call because alice is not in the managers group, and the agent relayed the refusal. Bob asks the same thing and it goes through:
 
-> **bob:** Approve the coffee expense
+> **bob:** Approve "Coffee"
 >
-> **agent:** Done. The coffee expense (45 SEK) submitted by alice is now approved.
+> **agent:** Expense "Coffee" has been approved.
 
-The expense item in DynamoDB now reads `approvedBy: bob`. Not `approvedBy: agent`, not a service account, a person. Put the two tokens side by side. Alice's login token carries `openid profile` for the frontend client. The token the MCP server saw carries the expense scopes for the agent client, with the same `sub`. Same human, different power, and the difference is exactly what she consented to.
+The expense item in DynamoDB now reads `approvedBy: bob`. Not `approvedBy: agent`, not a service account, a person. Put bob's two tokens side by side. His login token carries `openid profile` for the frontend client. The token the MCP server saw carries the expense scopes and his group for the agent client, with the same `sub`. Same human, different power, and the difference is exactly what he consented to.
 
-{/* IMAGE: decoded token pair, login token vs delegated token */}
+```json
+// bob's login token
+{
+  "sub": "a07cb95c-c0f1-704f-3d74-e5c44138c032",
+  "client_id": "1gb4d621up8enhjc1gbjje3am2",
+  "scope": "openid profile",
+  "username": "bob",
+  "token_use": "access"
+}
+```
+
+```json
+// the delegated token the MCP server saw
+{
+  "sub": "a07cb95c-c0f1-704f-3d74-e5c44138c032",
+  "cognito:groups": ["managers"],
+  "client_id": "5mjj06ii7fj5n8mp5h41o9064c",
+  "scope": "expenses/approve openid expenses/read expenses/write",
+  "username": "bob",
+  "token_use": "access"
+}
+```
 
 ## Tradeoffs
 
 The consent round trip is real friction. A redirect, a completion endpoint, an allowlisted return URL, and infrastructure to support all three. For a single-tenant internal tool where one person owns everything, an API key is less work and delegation buys you little. It starts paying for itself the moment a second user shows up: per-user permissions, per-user revocation, and an audit trail with names in it.
 
-Some rough edges worth knowing about. Cognito auto-grants scopes for its own app clients, so this demo has no real consent screen, just a redirect bounce. With a third party provider like Google or GitHub the user would see a proper one. First use per user costs a full authorization round trip, though vault hits after that are cheap, and this design runs the MCP handshake on every invocation, which production code would cache. Deploys cause a brief gap too, since invocations answer 424 while an endpoint rolls to a new version. And the developer experience is Python first. The decorators and `agentcore dev` conveniences stop there, so C# gets the raw APIs. For this post that was fine, but the gap is real.
+Some rough edges worth knowing about:
+
+- Cognito auto-grants scopes for its own app clients, so this demo has no real consent screen, just a redirect bounce. A third party provider like Google or GitHub would show one.
+- First use per user costs a full authorization round trip. Vault hits after that are cheap.
+- This design runs the MCP handshake on every invocation. Production code would cache the connection.
+- Invocations answer 424 while an endpoint rolls to a new version, so deploys cause a brief gap.
+- The developer experience is Python first. The decorators and `agentcore dev` conveniences stop there, so C# gets the raw APIs. For this post that was fine, but the gap is real.
+
+On cost, the reflection from the [centaur chess post](https://www.ganhammar.se/posts/building-a-centaur-chess-app-with-agentcore-runtime-and-strands-agents) applies here too. Each runtime session is a dedicated microVM that lives until its idle timeout, so a conversation with pauses pays for idle time. The identity layer itself adds almost nothing. The credential provider stores one client secret in Secrets Manager at standard pricing, per provider rather than per user, and the delegated tokens live in the vault with no billing surface of their own. Lambda and DynamoDB round to zero at this scale.
 
 ## Companion Repository
 
 The full example is in the [GitHub repository](https://github.com/ganhammar/who-approved-this): agent, MCP server, CDK stack, frontend, and the deploy pipeline. To run it yourself, fork it, point the workflow at an OIDC deploy role, set a demo password secret, and push. The README covers the details.
 
-The pattern generalizes past expenses. Anywhere an agent acts for signed-in users, against any API that speaks OAuth2, the same three tokens and the same binding step apply. I have a smart home full of devices with rather different opinions about who may unlock the front door, and a [Home Assistant MCP server](https://github.com/ganhammar/hass-mcp-server) that suddenly looks like it deserves the same treatment. Perhaps a follow-up.
+The pattern generalizes past expenses. Anywhere an agent acts for signed-in users, against any API that speaks OAuth2, the same three tokens and the same binding step apply.
