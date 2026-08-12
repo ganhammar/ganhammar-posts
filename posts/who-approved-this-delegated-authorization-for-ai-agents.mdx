@@ -19,9 +19,9 @@ Agents need the on-behalf-of flow more than classic services ever did, because a
 
 An expense assistant. Alice, an employee, chats with an agent that can list her expenses and submit new ones. Bob, her manager, uses the same agent to approve them. The same prompt gives different outcomes depending on who is signed in, and every action lands in the trail under the human's name. The business logic is deliberately boring, three tools and one DynamoDB table, because the authorization wiring around it is the point.
 
-The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop with no framework. The MCP server runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and session binding calls, so the browser talks to a single origin and needs no AWS SDK.
+The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. The MCP server runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and session binding calls, so the browser talks to a single origin.
 
-Everything except the frontend is C#, including the CDK stack. There is no AgentCore SDK for .NET, and it turns out you do not need one. The identity APIs ship in the regular AWS SDK, and the runtime contract is two HTTP endpoints.
+Everything except the frontend is C#, including the CDK stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
 
 ```mermaid
 flowchart LR
