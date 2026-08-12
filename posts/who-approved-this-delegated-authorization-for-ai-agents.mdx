@@ -23,20 +23,7 @@ The frontend is plain HTML and JavaScript, served from S3 through CloudFront, wh
 
 Everything except the frontend is C#, including the CDK stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
 
-```mermaid
-flowchart LR
-    U((alice / bob)) -->|sign in| COG[Cognito user pool]
-    U --> CF[CloudFront]
-    CF --> S3[Frontend, S3]
-    CF -->|/runtimes/*| RT[Agent, AgentCore Runtime]
-    CF -->|/oauth/*| MCP[MCP server, Lambda AOT]
-    RT --> NOVA[Bedrock, Nova Pro]
-    RT -->|delegated token| MCP
-    RT --> ID[AgentCore Identity, token vault]
-    ID -.->|authorization code flow| COG
-    MCP -.->|validate JWT| COG
-    MCP --> DDB[(DynamoDB)]
-```
+![Architecture diagram](./assets/who-approved-this-architecture.png)
 
 ## The Delegation Model
 
@@ -56,41 +43,7 @@ The third is the delegated token, the one this post is named after. The agent ha
 
 The first time alice asks, the vault is empty and there is nothing to hand out. Instead, AgentCore Identity generates an authorization URL, and the agent relays it into the chat. Alice clicks it and consents. The consent by itself does not finish the flow. The redirect lands back on our application with a session identifier, and the application must call `CompleteResourceTokenAuth` before AgentCore Identity fetches and stores the token. That step gets its own section.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant B as Browser (alice)
-    participant C as Cognito
-    participant R as AgentCore Runtime
-    participant A as Agent container
-    participant I as AgentCore Identity
-    participant M as MCP server
-
-    B->>C: Sign in (code + PKCE, login client)
-    C-->>B: Login token (openid profile)
-    B->>R: InvokeAgentRuntime, Bearer login token
-    R->>R: Validate JWT, mint workload token
-    R->>A: /invocations, WorkloadAccessToken header
-    A->>I: GetResourceOauth2Token(workload token)
-    I-->>A: Authorization URL (vault empty)
-    A-->>B: Reply with consent link
-    B->>I: Open authorization URL
-    I->>C: /oauth2/authorize (agent client, expense scopes)
-    C-->>I: Authorization code (alice's session)
-    I-->>B: Redirect to app with session_id
-    B->>M: POST /oauth/complete, Bearer login token
-    M->>I: CompleteResourceTokenAuth(session_id, alice's token)
-    I->>C: Redeem code for the delegated token
-    I->>I: Vault the token, keyed to alice
-    B->>R: Ask again (same session)
-    R->>A: /invocations, WorkloadAccessToken header
-    A->>I: GetResourceOauth2Token(workload token)
-    I-->>A: Delegated token (vault hit)
-    A->>M: Tool call, Bearer delegated token
-    M->>M: Check scopes and the managers group
-    M-->>A: Result
-    A-->>B: Answer
-```
+![Delegation sequence](./assets/who-approved-this-sequence.png)
 
 The two Cognito app clients are the load-bearing wall of this design. The login client proves who alice is. The agent client holds what the agent may be granted on her behalf, the expense scopes, behind a client secret that only AgentCore Identity ever sees. The agent's power comes entirely from the vaulted delegated token, which exists only because alice consented, is scoped to what the client allows, and dies with her grant.
 
@@ -303,6 +256,8 @@ Consent alone stores nothing, and the getting started material does not mention 
 > means the user needs a fresh ask if they walk away mid grant.
 
 The step exists for a good reason. An authorization URL is just a link, and links get forwarded. Session binding is your application attesting that the person who consented is the person with an active session right now, so a grant cannot be planted by handing someone else's consent link to a logged-in victim. The [session binding documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/oauth2-authorization-url-session-binding.html) covers the design, and notes that `agentcore dev` hosts this callback and calls the API for you in local development, so the flow works end to end without your application doing anything, right up until you deploy to the real runtime.
+
+![Session binding sequence](./assets/who-approved-this-binding.png)
 
 In this system the completion endpoint lives on the MCP server, which already authenticates exactly these users. `RequireAuthorization` means only someone holding a valid login token can complete a grant, and that token doubles as the attestation:
 
