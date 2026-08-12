@@ -1,0 +1,38 @@
+name: Publish
+
+# The site bakes these posts in at build time, so pushing here does not
+# publish anything on its own. This tells ganhammar/ganhammar to rebuild.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'posts/**'
+  workflow_dispatch:
+
+# Nothing here touches this repository; the dispatch is authenticated with a
+# token scoped to the site repo instead.
+permissions: {}
+
+# A burst of pushes only needs one rebuild.
+concurrency:
+  group: publish
+  cancel-in-progress: true
+
+jobs:
+  rebuild-site:
+    name: Rebuild the site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger site rebuild
+        env:
+          GH_TOKEN: ${{ secrets.GANHAMMAR_CONTENTS_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GANHAMMAR_CONTENTS_TOKEN is not set, so the site was not rebuilt."
+            exit 1
+          fi
+
+          gh api repos/ganhammar/ganhammar/dispatches \
+            --field event_type=posts-updated
+
+          echo "Asked ganhammar/ganhammar to rebuild."
