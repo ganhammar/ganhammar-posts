@@ -7,19 +7,19 @@ status: draft
 
 # Who Approved This? Delegated Authorization for AI Agents with AgentCore Identity
 
-In 2019, a misconfigured firewall at Capital One was tricked into [lending out its AWS credentials](https://krebsonsecurity.com/2019/07/capital-one-data-theft-impacts-106m-people/). The interesting part is not the trick, it is what those credentials could do: read about a hundred million credit applications out of S3, something no firewall ever needs to do. Three years earlier, an AWS key committed to one of Uber's private repos [unlocked archives on 57 million riders and drivers](https://www.ftc.gov/news-events/news/press-releases/2018/04/uber-agrees-expanded-settlement-ftc-related-privacy-security-claims). That is an old pattern in application security. Software holding more power than any person it serves, with logs that record what the application did, not who asked for it. Before OAuth, integrations worked that way by default. Either the application ran in god mode on a privileged service account, or it asked users for their actual passwords, like RockYou, which collected webmail passwords for contact importing and [leaked 32 million credentials from plaintext storage](https://techcrunch.com/2009/12/14/rockyou-hack-security-myspace-facebook-passwords/) in 2009.
+In 2019, a misconfigured firewall at Capital One was tricked into [lending out its AWS credentials](https://krebsonsecurity.com/2019/07/capital-one-data-theft-impacts-106m-people/). The trick matters less than what those credentials could do: read about a hundred million credit applications out of S3, something no firewall ever needs to do. Three years earlier, an AWS key committed to one of Uber's private repos [unlocked archives on 57 million riders and drivers](https://www.ftc.gov/news-events/news/press-releases/2018/04/uber-agrees-expanded-settlement-ftc-related-privacy-security-claims). That is an old pattern in application security. Software holding more power than any person it serves, with logs that record what the application did, not who asked for it. Before OAuth, integrations worked that way by default. Either the application ran in god mode on a privileged service account, or it asked users for their actual passwords, like RockYou, which collected webmail passwords for contact importing and [leaked 32 million credentials from plaintext storage](https://techcrunch.com/2009/12/14/rockyou-hack-security-myspace-facebook-passwords/) in 2009.
 
 We spent the better part of two decades fixing that. Authorization code flows, scoped access tokens, refresh tokens, revocation. Later, token exchange ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)) gave middle services a standard way to trade a user's token for a narrower downstream token, what Microsoft calls the on-behalf-of flow. I have [explored this before](https://www.ganhammar.se/posts/delegation-tokens-with-amazon-cognito) in the context of Amazon Cognito, where a service constrains what a downstream actor may do with a user's identity.
 
 Then AI agents arrived, and we regressed about twenty years. The typical agent integration today is an API key in an environment variable, which is god mode all over again. We already know how that story ends. In 2021, the [Codecov breach](https://about.codecov.io/security-update/) harvested exactly these keys out of thousands of CI environments and used them to reach downstream systems. The agent can do everything its key allows, for every user it serves, and when someone asks "who approved this expense?" the honest answer is "the agent did". That answer is useless. The user the agent acted for is gone from the trail, and revoking one user's access means rotating a key that everyone shares.
 
-Agents need the on-behalf-of flow more than classic services ever did, because an agent is a far less predictable actor than a REST endpoint. This post builds that flow on AWS, with an agent on Amazon Bedrock AgentCore Runtime that acts on behalf of the signed-in user, holds only the permissions that user granted it, and leaves the user's name in the audit trail. In C#, end to end.
+Agents need the on-behalf-of flow more than classic services ever did, because an agent is a far less predictable actor than a REST endpoint. This post builds that flow on AWS, with an agent on Amazon Bedrock AgentCore Runtime that acts on behalf of the signed-in user, holds only the permissions that user granted it, and leaves the user's name in the audit trail, in C# end to end.
 
 ## What We Are Building
 
 An expense assistant. Alice, an employee, chats with an agent that can list her expenses and submit new ones. Bob, her manager, uses the same agent to approve them. The same prompt gives different outcomes depending on who is signed in, and every action lands in the trail under the human's name. The business logic is deliberately boring, three tools and one DynamoDB table, because the authorization wiring around it is the point.
 
-The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. The MCP server runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and session binding calls, so the browser talks to a single origin.
+The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. The MCP server, MCP being the protocol agents speak to their tools, runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and consent completion calls, so the browser talks to a single origin.
 
 Everything except the frontend is C#, including the CDK stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
 
@@ -29,7 +29,7 @@ Everything except the frontend is C#, including the CDK stack. AgentCore has no 
 
 Three tokens move through this system, and keeping them apart is most of what there is to understand about AgentCore Identity.
 
-The first is the login token. Alice signs in to the frontend through the Cognito Hosted UI using the authorization code flow with PKCE, and her browser ends up with an access token issued to the frontend app client. That client is allowed the scopes `openid` and `profile`, nothing else. Her own token cannot call the expense API, and that is deliberate.
+The first is the login token. Alice signs in to the frontend through the Cognito Hosted UI using the authorization code flow with PKCE, and her browser ends up with an access token issued to the frontend app client. That client is allowed the scopes `openid` and `profile`, nothing else, so her own token cannot call the expense API.
 
 The second is the workload access token. When the browser invokes the agent, AgentCore Runtime validates her token against the user pool, using the discovery URL and allowed client id we configure on the runtime. It then exchanges the validated token for a workload access token and delivers it to the container in a request header named `WorkloadAccessToken`. This token represents the agent acting in a session that belongs to alice, and none of it is code we write.
 
@@ -45,7 +45,7 @@ The first time alice asks, the vault is empty and there is nothing to hand out. 
 
 ![Delegation sequence](./assets/who-approved-this-sequence.png)
 
-The two Cognito app clients are the load-bearing wall of this design. The login client proves who alice is. The agent client holds what the agent may be granted on her behalf, the expense scopes, behind a client secret that only AgentCore Identity ever sees. The agent's power comes entirely from the vaulted delegated token, which exists only because alice consented, is scoped to what the client allows, and dies with her grant.
+The design rests on the two Cognito app clients. The login client proves who alice is. The agent client holds what the agent may be granted on her behalf, the expense scopes, behind a client secret that only AgentCore Identity ever sees. The agent's power comes entirely from the vaulted delegated token, which exists only because alice consented, is scoped to what the client allows, and dies with her grant.
 
 > [!NOTE]
 > The client secret on its own grants nothing. The agent client only
@@ -53,7 +53,7 @@ The two Cognito app clients are the load-bearing wall of this design. The login 
 > of a signed-in user's consent, and never carry more than that user's
 > grant.
 
-One distinction does a lot of quiet work in the expense server. Scopes describe what a client may request on a user's behalf, and Cognito grants them per client, not per user. Whether alice may actually approve expenses is a property of alice, not of the client, and it lives in her `cognito:groups` claim. The approve tool therefore requires both the approve scope on the token and the managers group on the user behind it. Delegation controls how far the agent may reach, the group controls how far the human could reach in the first place.
+One distinction matters in the expense server. Scopes describe what a client may request on a user's behalf, and Cognito grants them per client, not per user. Whether alice may actually approve expenses is a property of alice, not of the client, and it lives in her `cognito:groups` claim. The approve tool therefore requires both the approve scope on the token and the managers group on the user behind it. Delegation controls how far the agent may reach, the group controls how far the human could reach in the first place.
 
 > [!NOTE]
 > Cognito only includes `cognito:groups` in access tokens granted with
@@ -62,7 +62,7 @@ One distinction does a lot of quiet work in the expense server. Scopes describe 
 
 ## The Expense MCP Server
 
-The server is where delegation gets enforced. It trusts the token in front of it, not the agent that sent it. The [official MCP C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) plugs into standard ASP.NET Core authentication, so the wiring is ordinary JwtBearer against the user pool, plus the MCP challenge scheme:
+The server is where delegation gets enforced, and it authenticates every request by the token it carries, our own agent included. The [official MCP C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) plugs into standard ASP.NET Core authentication, so the wiring is ordinary JwtBearer against the user pool, plus the MCP challenge scheme:
 
 ```csharp
 var issuer = $"https://cognito-idp.{region}.amazonaws.com/{userPoolId}";
@@ -143,7 +143,7 @@ A thrown `McpException` reaches the model as a tool error, which is what lets th
 
 AgentCore Runtime asks very little of a container. Answer `GET /ping` with a health status and `POST /invocations` with whatever your agent does. Ours is an ASP.NET Core minimal API around a Bedrock Converse loop, with the MCP server's tool list mapped to Converse tool specs. There is no agent framework in it, since a framework would only bury the identity code.
 
-That identity code is short. The invocation handler picks up the workload token the runtime delivered and asks the broker for alice's delegated token:
+The identity code amounts to an invocation handler and a broker. The handler picks up the workload token the runtime delivered and asks the broker for alice's delegated token:
 
 ```csharp
 app.MapPost("/invocations", async (
@@ -238,12 +238,11 @@ await using var mcp = await McpClient.CreateAsync(new HttpClientTransport(new()
 }));
 ```
 
-Returning the authorization URL for every message would mean a user who says "hi" gets an authorization ceremony. Instead, `RunWithoutAccess` runs the model with no tools and puts the link in the system prompt, with instructions to surface it only when the request actually needs expense access. The model decides relevance.
+Returning the authorization URL for every message would mean a user who says "hi" gets an authorization ceremony. Instead, `RunWithoutAccess` runs the model with no tools and puts the link in the system prompt, with instructions to surface it only when the request actually needs expense access.
 
 > [!NOTE]
 > Nova models interleave `<thinking>` blocks into their text output.
-> The agent strips those before returning a reply, since they are
-> reasoning scaffolding rather than an answer.
+> The agent strips those before returning a reply.
 
 ## Closing the Loop: Session Binding
 
@@ -276,7 +275,7 @@ app.MapPost("/oauth/complete", async (
 }).RequireAuthorization();
 ```
 
-The frontend's part is small. When the page loads with a `session_id` in the query string, POST it to the endpoint with the user's token, then let the conversation continue. Two details matter. The return URL must be allowlisted on the runtime's workload identity, or the token request fails outright, and the browser must keep the same runtime session id across the redirect, because the pending grant belongs to the session that requested it. For extra hardening, an opaque `customState` carried through the round trip protects the callback against cross-site request forgery. We lean on the endpoint requiring the user's own valid token and leave the state parameter as an exercise.
+On the frontend, when the page loads with a `session_id` in the query string, POST it to the endpoint with the user's token, then let the conversation continue. Two details matter. The return URL must be allowlisted on the runtime's workload identity, or the token request fails outright, and the browser must keep the same runtime session id across the redirect, because the pending grant belongs to the session that requested it. For extra hardening, an opaque `customState` carried through the round trip protects the callback against cross-site request forgery. We lean on the endpoint requiring the user's own valid token and leave the state parameter as an exercise.
 
 ## Deploying It
 
@@ -339,7 +338,7 @@ The agent did not decide this. The approve tool rejected the call because alice 
 >
 > **agent:** Expense "Coffee" has been approved.
 
-The expense item in DynamoDB now reads `approvedBy: bob`. Not `approvedBy: agent`, not a service account, a person. Put bob's two tokens side by side. His login token carries `openid profile` for the frontend client. The token the MCP server saw carries the expense scopes and his group for the agent client, with the same `sub`. Same human, different power, and the difference is exactly what he consented to.
+The expense item in DynamoDB now reads `approvedBy: bob`. Not `approvedBy: agent`, not a service account, a person. Put bob's two tokens side by side. His login token carries `openid profile` for the frontend client. The token the MCP server saw carries the expense scopes and his group for the agent client, with the same `sub`.
 
 ```json
 // bob's login token
