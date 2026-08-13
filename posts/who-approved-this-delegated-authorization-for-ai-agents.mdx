@@ -363,6 +363,31 @@ The expense item in DynamoDB now reads `approvedBy: bob`. Not `approvedBy: agent
 }
 ```
 
+## Blast Radius
+
+The incidents from the introduction make a fair test of what this design changes. The Capital One failure was a component whose role could read data it had no business reading. Here, the runtime's execution role can invoke Bedrock, read one provider secret, and broker tokens. It has no access to the expense table, so stealing the agent's own credentials yields no expenses. The Uber failure was a static key that worked for whoever held it. The equivalent artifact here is the agent client secret, and it only participates in the authorization code flow, so a leaked copy produces nothing without a signed-in user consenting. Codecov is the one this design does not answer. The deploy pipeline's role can change the MCP server itself, and delegation downstream does not help once the pipeline is compromised.
+
+A compromised agent is a different case from a leaked credential. An attacker with a foothold in the runtime, or a prompt injection carried in a poisoned expense description, acts with the delegated token of whoever is talking to the agent. An API key gave away every user at once, offline and indefinitely. This reaches a single user's data, inside that user's grant, only while that user is active, and disabling the user ends it within the access token lifetime. What remains exposed is whatever the model can be talked into doing with that authority.
+
+That leads to an accountability wrinkle. If bob's agent approves an expense because the expense description talked it into it, the trail still reads `approvedBy: bob`. Delegation settles whose authority the agent used, and leaves open who made the decision. For actions that matter, that argues for a confirmation step in front of the human.
+
+The token vault concentrates live tokens for every user of the agent, gated behind the workload identity and encrypted with a service managed key, with a customer managed key as an option. A security review should still treat it as a credential store.
+
+## Revoking a Grant
+
+The grant lives in the vault as a refresh token. Each renewal asks Cognito for a fresh access token, which arrives with the claims Cognito holds at that moment, and the refresh token itself stays valid for as long as the agent client allows, thirty days on default settings. A grant that nobody touches persists across sessions for that long. This is the same persistence the earlier note on widened scopes ran into.
+
+Ending it runs through Cognito. Offboarding means disabling the user, which stops the vault from renewing the grant:
+
+```bash
+aws cognito-idp admin-disable-user \
+  --user-pool-id "$POOL_ID" --username alice
+```
+
+What remains after that is the access token already issued, which the MCP server validates statelessly and accepts until it expires, up to an hour on default settings. The access token lifetime is a setting on the agent app client if an hour is too long. [Global sign-out](https://docs.aws.amazon.com/cognito/latest/developerguide/token-revocation.html) revokes the refresh tokens too, but for a user who is still enabled it buys less than it appears to. The next invocation gets a fresh consent link, and one click restores the grant, so on its own it is a session reset. Removing bob from the managers group is the role downgrade. It takes effect within the access token lifetime, because the next renewal mints a token with the current group claims.
+
+The AgentCore API has no operation that removes a single entry from the vault. The levers are the user, the group, and, for everything at once, deleting the credential provider. A shared API key gives you one lever, rotating it for everyone.
+
 ## Tradeoffs
 
 The consent round trip is real friction. A redirect, a completion endpoint, an allowlisted return URL, and infrastructure to support all three. For a single-tenant internal tool where one person owns everything, an API key is less work and delegation buys you little. It starts paying for itself the moment a second user shows up: per-user permissions, per-user revocation, and an audit trail with names in it.
