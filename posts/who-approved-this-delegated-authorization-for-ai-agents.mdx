@@ -19,7 +19,7 @@ Agents need the on-behalf-of flow more than classic services ever did, because a
 
 An expense assistant. Alice, an employee, chats with an agent that can list her expenses and submit new ones. Bob, her manager, uses the same agent to approve them. The same prompt gives different outcomes depending on who is signed in, and every action lands in the trail under the human's name. The business logic is deliberately boring, three tools and one DynamoDB table, because the authorization wiring around it is the point.
 
-The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. The MCP server, MCP being the protocol agents speak to their tools, runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and consent completion calls, so the browser talks to a single origin.
+The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. MCP is the protocol agents speak to their tools. The MCP server runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and consent completion calls, so the browser talks to a single origin.
 
 Everything except the frontend is C#, including the CDK stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
 
@@ -53,7 +53,7 @@ The design rests on the two Cognito app clients. The login client proves who ali
 > of a signed-in user's consent, and never carry more than that user's
 > grant.
 
-One distinction matters in the expense server. Scopes describe what a client may request on a user's behalf, and Cognito grants them per client, not per user. Whether alice may actually approve expenses is a property of alice, not of the client, and it lives in her `cognito:groups` claim. The approve tool therefore requires both the approve scope on the token and the managers group on the user behind it. Delegation controls how far the agent may reach, the group controls how far the human could reach in the first place.
+One distinction matters in the expense server. Scopes describe what a client may request on a user's behalf, and Cognito grants them per client, not per user. Whether alice may actually approve expenses lives in her `cognito:groups` claim, and that is a property of alice. The approve tool therefore requires both the approve scope on the token and the managers group on the user behind it. Delegation controls how far the agent may reach. The group controls how far the human could reach in the first place.
 
 > [!NOTE]
 > Cognito only includes `cognito:groups` in access tokens granted with
@@ -224,7 +224,7 @@ public class TokenBroker
 > two-legged client credentials flow, for the narrower cases where the
 > agent legitimately acts as itself rather than for a user.
 
-With a token in hand, the agent connects to the MCP server as alice. The delegated token rides the connection, so every tool call downstream executes as the caller, never as the agent:
+With a token in hand, the agent connects to the MCP server as alice. The delegated token rides the connection, so every tool call downstream carries the caller's identity:
 
 ```csharp
 await using var mcp = await McpClient.CreateAsync(new HttpClientTransport(new()
