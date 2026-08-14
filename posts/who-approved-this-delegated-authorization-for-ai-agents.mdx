@@ -9,19 +9,21 @@ status: draft
 
 In 2019, a misconfigured firewall at Capital One was tricked into [lending out its AWS credentials](https://krebsonsecurity.com/2019/07/capital-one-data-theft-impacts-106m-people/). The trick matters less than what those credentials could do: read about a hundred million credit applications out of S3, something no firewall ever needs to do. Three years earlier, an AWS key committed to one of Uber's private repos [unlocked archives on 57 million riders and drivers](https://www.ftc.gov/news-events/news/press-releases/2018/04/uber-agrees-expanded-settlement-ftc-related-privacy-security-claims). That is an old pattern in application security. Software holding more power than any person it serves, with logs that record what the application did, not who asked for it. Before OAuth, integrations worked that way by default. Either the application ran in god mode on a privileged service account, or it asked users for their actual passwords, like RockYou, which collected webmail passwords for contact importing and [leaked 32 million credentials from plaintext storage](https://techcrunch.com/2009/12/14/rockyou-hack-security-myspace-facebook-passwords/) in 2009.
 
-We spent the better part of two decades fixing that. Authorization code flows, scoped access tokens, refresh tokens, revocation. Later, token exchange ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)) gave middle services a standard way to trade a user's token for a narrower downstream token, what Microsoft calls the on-behalf-of flow. I have [explored this before](https://www.ganhammar.se/posts/delegation-tokens-with-amazon-cognito) in the context of Amazon Cognito, where a service constrains what a downstream actor may do with a user's identity.
+We spent the better part of two decades fixing that. Authorization code flows, scoped access tokens, refresh tokens, revocation. Later, the token exchange standard ([RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)) gave middle services a way to trade a user's token for a narrower downstream token, what Microsoft calls the on-behalf-of flow. I have [explored this before](https://www.ganhammar.se/posts/delegation-tokens-with-amazon-cognito) in the context of Amazon Cognito, where a service constrains what a downstream actor may do with a user's identity.
 
-Then AI agents arrived, and we regressed about twenty years. The typical agent integration today is an API key in an environment variable, which is god mode all over again. We already know how that story ends. In 2021, the [Codecov breach](https://about.codecov.io/security-update/) harvested exactly these keys out of thousands of CI environments and used them to reach downstream systems. The agent can do everything its key allows, for every user it serves, and when someone asks "who approved this expense?" the honest answer is "the agent did". That answer is useless. The user the agent acted for is gone from the trail, and revoking one user's access means rotating a key that everyone shares.
+Then AI agents arrived, and we regressed about twenty years. The typical agent integration today is an API key in an environment variable, which is god mode all over again. We already know how that story ends. In 2021, the [Codecov breach](https://about.codecov.io/security-update/) harvested exactly these keys out of thousands of CI (continuous integration) environments and used them to reach downstream systems. The agent can do everything its key allows, for every user it serves, and when someone asks "who approved this expense?" the honest answer is "the agent did". That answer is useless. The user the agent acted for is gone from the trail, and revoking one user's access means rotating a key that everyone shares.
 
-Agents need the on-behalf-of flow more than classic services ever did, because an agent is a far less predictable actor than a REST endpoint. This post builds that flow on AWS, with an agent on Amazon Bedrock AgentCore Runtime that acts on behalf of the signed-in user, holds only the permissions that user granted it, and leaves the user's name in the audit trail, in C# end to end.
+Agents need the on-behalf-of flow more than classic services ever did, because an agent is a far less predictable actor than a REST endpoint.
+
+This post builds that flow on AWS, with an agent on Amazon Bedrock AgentCore Runtime that acts on behalf of the signed-in user, holds only the permissions that user granted it, and leaves the user's name in the audit trail, in C# end to end.
 
 ## What We Are Building
 
 An expense assistant. Alice, an employee, chats with an agent that can list her expenses and submit new ones. Bob, her manager, uses the same agent to approve them. The same prompt gives different outcomes depending on who is signed in, and every action lands in the trail under the human's name. The business logic is deliberately boring, three tools and one DynamoDB table, because the authorization wiring around it is the point.
 
-The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. MCP is the protocol agents speak to their tools. The MCP server runs on Lambda, compiled with Native AOT, owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and consent completion calls, so the browser talks to a single origin.
+The frontend is plain HTML and JavaScript, served from S3 through CloudFront, where users sign in through the Cognito Hosted UI. The agent runs in a container on AgentCore Runtime, a Bedrock Converse loop. MCP, the Model Context Protocol, is how agents speak to their tools. The MCP server runs on Lambda, compiled with Native AOT (ahead-of-time compilation), owns the expense table, and enforces every permission. Cognito plays both the identity provider and the downstream authorization server, which keeps the demo self-contained. In a real system the downstream could be any OAuth2 provider. CloudFront also proxies the agent and consent completion calls, so the browser talks to a single origin.
 
-Everything except the frontend is C#, including the CDK stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
+Everything except the frontend is C#, including the CDK (Cloud Development Kit) stack. AgentCore has no high-level SDK for .NET, so the code calls the service APIs from the AWS SDK directly.
 
 ![Architecture diagram](./assets/who-approved-this-architecture.png)
 
@@ -29,15 +31,15 @@ Everything except the frontend is C#, including the CDK stack. AgentCore has no 
 
 Three tokens move through this system, and keeping them apart is most of what there is to understand about AgentCore Identity.
 
-The first is the login token. Alice signs in to the frontend through the Cognito Hosted UI using the authorization code flow with PKCE, and her browser ends up with an access token issued to the frontend app client. That client is allowed the scopes `openid` and `profile`, nothing else, so her own token cannot call the expense API.
+The first is the login token. Alice signs in to the frontend through the Cognito Hosted UI using the authorization code flow with PKCE (Proof Key for Code Exchange), and her browser ends up with an access token issued to the frontend app client. That client is allowed the scopes `openid` and `profile`, nothing else, so her own token cannot call the expense API.
 
 The second is the workload access token. When the browser invokes the agent, AgentCore Runtime validates her token against the user pool, using the discovery URL and allowed client id we configure on the runtime. It then exchanges the validated token for a workload access token and delivers it to the container in a request header named `WorkloadAccessToken`. This token represents the agent acting in a session that belongs to alice, and none of it is code we write.
 
 > [!NOTE]
 > The identity documentation names this exchange
 > `GetWorkloadAccessTokenForJWT`. It exists as a public API, but with a
-> JWT authorizer configured on the runtime, the runtime calls it for
-> you and your code only ever sees the result.
+> JWT (JSON Web Token) authorizer configured on the runtime, the
+> runtime calls it for you and your code only ever sees the result.
 
 The third is the delegated token, the one this post is named after. The agent hands its workload token to AgentCore Identity by calling `GetResourceOauth2Token`, asking for a token for the expense API with the expense scopes. AgentCore Identity acts as the OAuth client here. It holds the client secret for a second Cognito app client, runs the authorization code flow against the user pool, and stores the resulting token in the token vault, a managed store that comes with AgentCore Identity, keyed to alice. On later calls the vault answers directly.
 
@@ -319,7 +321,7 @@ A few things the error messages will not lead you to gracefully:
 
 - AgentCore Identity stores the provider's client secret in Secrets Manager and reads it with the caller's permissions. Both the runtime execution role and whatever role calls `CompleteResourceTokenAuth` need `secretsmanager:GetSecretValue` on `bedrock-agentcore-identity!default/oauth2/<provider>-*`.
 - `UpdateWorkloadIdentity` authorizes against the workload identity directory ARN as well as the identity itself, so a least privilege policy needs both.
-- The runtime requires the image to be a single OCI manifest. Classic `docker build` pushes a Docker v2 manifest that passes ECR, CloudFormation, and the control plane, then fails at session start with a 424 and empty logs. Build with `docker buildx --provenance=false --sbom=false`.
+- The runtime requires the image to be a single OCI (Open Container Initiative) manifest. Classic `docker build` pushes a Docker v2 manifest that passes ECR, CloudFormation, and the control plane, then fails at session start with a 424 and empty logs. Build with `docker buildx --provenance=false --sbom=false`.
 - Set a `WORKDIR` in the image. With content root `/`, the ASP.NET configuration file watcher walks the entire filesystem of the microVM and the container never comes up, with the same silent 424.
 
 The binaries are built as Native AOT on GitHub's arm64 runners, with no containers in the Lambda path and the link step pinned to the glibc that `provided.al2023` ships. The workflow in the [companion repository](https://github.com/ganhammar/who-approved-this) is the reference.
@@ -404,6 +406,6 @@ On cost, the reflection from the [centaur chess post](https://www.ganhammar.se/p
 
 ## Companion Repository
 
-The full example is in the [GitHub repository](https://github.com/ganhammar/who-approved-this): agent, MCP server, CDK stack, frontend, and the deploy pipeline. To run it yourself, fork it, point the workflow at an OIDC deploy role, set a demo password secret, and push. The README covers the details.
+The full example is in the [GitHub repository](https://github.com/ganhammar/who-approved-this): agent, MCP server, CDK stack, frontend, and the deploy pipeline. To run it yourself, fork it, point the workflow at an OIDC (OpenID Connect) deploy role, set a demo password secret, and push. The README covers the details.
 
 The pattern generalizes past expenses. Anywhere an agent acts for signed-in users, against any API that speaks OAuth2, the same three tokens and the same binding step apply.
