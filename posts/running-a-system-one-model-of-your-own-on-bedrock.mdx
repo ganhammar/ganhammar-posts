@@ -12,7 +12,7 @@ A lot of what we use language models for in production comes down to answering a
 
 In September, TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text at all. You send it some evidence and a question with named options, and it returns a probability for each option. There is nothing to parse, and no confidence to ask for, since the probability is the answer. TypeSafe sells it on three things: it is fast, the output is always structured, and it is cheap.
 
-I wanted to know how much of that you can get from an open model that you run yourself, on your own AWS account and in your own region, and what it costs you. This post is the answer, with the measurements that go with it. To have something real to decide about, it also builds a pipeline that reads every error log in an AWS account, decides whether each error is ours, and files a GitHub issue with a root cause when it is.
+I wanted to know how much of that you can get from an open model that you run yourself, on your own AWS account and in your own region, and what it costs you, so I measured it. To have something real to decide about, I also built a pipeline that reads every error log in an AWS account, decides whether each error is ours, and files a GitHub issue with a root cause when it is.
 
 ## What We Are Building
 
