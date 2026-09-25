@@ -75,6 +75,8 @@ return new ScoreResult(optionIds, SoftmaxAllowMissing(optionLogprobs), declaredM
 > it has not detected a chat template, and sending `messages` and
 > trusting the server to render them is not safe.
 
+## Two Things That Fail Quietly
+
 Two details took most of a day to find, and neither of them produces an error.
 
 The first is the chat template. Qwen3 is a reasoning model, and its packaged template ends the prompt at the start of the assistant's turn, which leaves the model free to open a `<think>` block. When it does, the first sampled token is the start of that block, and the distribution we read is over ways to begin thinking rather than over answer letters. The fix is to render the prompt ourselves and close an empty reasoning block inside it:
