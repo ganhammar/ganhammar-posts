@@ -26,82 +26,54 @@ The model in that box is Qwen3-4B, a four billion parameter open model, imported
 
 ## How the Readout Works
 
-A language model produces, at each step, a probability for every token in its vocabulary, and something then picks one of them. Generating text is that loop run many times. A typed decision runs it once and reads the probabilities instead of picking.
+A language model produces, at each step, a probability for every token in its vocabulary, and something then picks one of them. Generating text is that loop run many times. A typed decision runs it once and reads the probabilities instead of picking. The prompt lists the options as lettered choices and tells the model to answer with a single uppercase letter, we ask for exactly one token, and instead of reading which token it chose we read the log probabilities it assigned to `A`, `B`, `C` and so on at that position. The model never writes a sentence, so there is nothing to parse, and the probability we get is the model's own distribution over the answers rather than a number it was asked to type.
 
-The prompt lists the options as lettered choices and tells the model to answer with a single uppercase letter. We ask the model for exactly one token. Rather than reading which token it chose, we read the log probabilities it assigned to `A`, `B`, `C` and so on at that position, and normalise those into a probability per option. The model never writes a sentence, so there is no sentence to parse, and the probability we get is the model's own distribution over the answers rather than a number it was asked to type.
-
-On Bedrock the readout is one method, and it reads best in four steps. First the request. The prompt is rendered to a string (more on that below), and the model is asked for one token and the twenty most likely candidates at that position:
+On Bedrock that is one method in three steps. The request asks for one token and the twenty most likely candidates at that position, with the prompt rendered to a string ourselves (more on that below):
 
 ```csharp
-var messages = Semif.DirectMessages(row);
-var letters = Semif.Letters[..options.GetArrayLength()];
-
-using (var writer = new Utf8JsonWriter(stream))
-{
-    writer.WriteStartObject();
-    writer.WriteNumber("max_tokens", 1);
-    writer.WriteNumber("temperature", 0);
-    writer.WriteString("prompt", Semif.RenderQwen3Prompt(messages));
-    writer.WriteNumber("logprobs", TopLogprobs);   // 20
-    writer.WriteEndObject();
-}
-
-var responseBytes = await invoke(modelArn, requestBody, cancellationToken);
+writer.WriteStartObject();
+writer.WriteNumber("max_tokens", 1);
+writer.WriteNumber("temperature", 0);
+writer.WriteString("prompt", Semif.RenderQwen3Prompt(messages));
+writer.WriteNumber("logprobs", TopLogprobs);   // 20
+writer.WriteEndObject();
 ```
 
-The response has the shape of an OpenAI completion, and the candidates live under `choices[0].logprobs.top_logprobs[0]`, one entry per token text. The second step pulls them out:
+The response has the shape of an OpenAI completion, with the candidates under `choices[0].logprobs.top_logprobs[0]`, one entry per token text. Each option is then matched to the letter it was presented as, and a letter that did not make the top twenty gets negative infinity, which is what "no probability" looks like in log space:
 
 ```csharp
-var choice = payload.GetProperty("choices")[0];
-var logprobs = choice.GetProperty("logprobs");
-var positions = logprobs.GetProperty("top_logprobs");   // one object per sampled position
+var byToken = payload.GetProperty("choices")[0]
+    .GetProperty("logprobs").GetProperty("top_logprobs")[0]
+    .EnumerateObject()
+    .ToDictionary(p => p.Name, p => p.Value.GetDouble(), StringComparer.Ordinal);
 
-var byToken = new Dictionary<string, double>(StringComparer.Ordinal);
-foreach (var property in positions[0].EnumerateObject())
-{
-    byToken[property.Name] = property.Value.GetDouble();
-}
-```
-
-Third, each option is matched to the letter it was presented as. Option one was `A`, option two was `B`, and so on. A letter that did not make the top twenty gets negative infinity, which is what "no probability" looks like in log space:
-
-```csharp
-var optionIds = new List<string>();
 var optionLogprobs = new List<double>();
 var index = 0;
 foreach (var option in options.EnumerateArray())
 {
-    optionIds.Add(option.GetProperty("id").GetString()!);
-    optionLogprobs.Add(byLetter.TryGetValue(letters[index].ToString(), out var logprob)
+    optionLogprobs.Add(byToken.TryGetValue(letters[index].ToString(), out var logprob)
         ? logprob
         : double.NegativeInfinity);
     index++;
 }
 ```
 
-Last, the log probabilities become probabilities. Before normalising, the code adds up how much of the model's probability landed on the declared letters at all, which is a number I will come back to. Then a softmax runs over the letters that were present, and absent letters stay at zero:
+Last, the log probabilities become probabilities. Before normalising, the code sums how much of the model's probability landed on the declared letters at all, which is a number I will come back to. A softmax then runs over the letters that were present, and absent letters stay at zero:
 
 ```csharp
 var declaredMass = optionLogprobs.Where(double.IsFinite).Sum(Math.Exp);
 return new ScoreResult(optionIds, SoftmaxAllowMissing(optionLogprobs), declaredMass);
-
-private static double[] SoftmaxAllowMissing(IReadOnlyList<double> logprobs)
-{
-    var finite = logprobs.Where(double.IsFinite).ToArray();
-    if (finite.Length == 0)
-    {
-        return new double[logprobs.Count];
-    }
-    if (finite.Length == 1)
-    {
-        return logprobs.Select(value => double.IsFinite(value) ? 1.0 : 0.0).ToArray();
-    }
-    var finiteProbabilities = new Queue<double>(Semif.Softmax(finite));
-    return logprobs.Select(value => double.IsFinite(value) ? finiteProbabilities.Dequeue() : 0.0).ToArray();
-}
 ```
 
-That is the whole readout. The rest of the file is validation and error messages.
+`SoftmaxAllowMissing` is a plain softmax with two edge cases: no letters present gives all zeros, and one letter present gives that option probability one. That is the whole readout; the rest of the file is validation and error messages.
+
+> [!NOTE]
+> Bedrock exposes two request shapes for imported models, one modelled
+> on OpenAI's Completions API and one on Chat Completions. The readout
+> uses the first, since it takes a fully rendered prompt. Bedrock also
+> reports `instructSupported: false` for the imported Qwen3 models, so
+> it has not detected a chat template, and sending `messages` and
+> trusting the server to render them is not safe.
 
 Two details took most of a day to find, and neither of them produces an error.
 
@@ -111,7 +83,7 @@ The first is the chat template. Qwen3 is a reasoning model, and its packaged tem
 public const string QwenThinkSuppressedSuffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 ```
 
-With that suffix in place the answer letter is the first thing the model can produce. It is the same string Qwen's own tooling emits when thinking is disabled, and it is the reason the function renders the prompt locally instead of letting Bedrock apply the model's template.
+With that suffix in place the answer letter is the first thing the model can produce. It is the same string Qwen's own tooling emits when thinking is disabled.
 
 > [!NOTE]
 > The prompt strings are kept byte-identical to SemIf's, so the SHA-256
@@ -121,7 +93,7 @@ With that suffix in place the answer letter is the first thing the model can pro
 
 The second is the `logprobs` field. On the request shape Bedrock uses for imported models it is an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else, every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. I found it by sending both forms and counting the candidates that came back: one against twenty.
 
-Those two failures are the reason the readout tracks one more number, which I call declared mass: the share of the model's probability that landed on the option letters at all, before normalising. When everything works it is 1.0000 at the median and 0.9996 at the minimum across the test set, so the model is putting essentially all of its probability on the letters we declared. When it drops, the model is answering some other question, and the normalised probabilities are a ratio of two small numbers presented as a decision. Jev does not expose this number. The readout does, and it is the first thing I look at when a result seems wrong.
+Those two failures are the reason the readout keeps the declared mass: the share of the model's probability that landed on the option letters at all, before normalising. When everything works it is 1.0000 at the median and 0.9996 at the minimum across the test set, so the model is putting essentially all of its probability on the letters we declared. When it drops, the model is answering some other question, and the normalised probabilities are a ratio of two small numbers presented as a decision. Jev does not expose this number. The readout does, and it is the first thing I look at when a result seems wrong.
 
 ## Getting a Model into Bedrock
 
