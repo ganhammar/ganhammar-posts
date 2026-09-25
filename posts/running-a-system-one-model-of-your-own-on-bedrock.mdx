@@ -10,7 +10,7 @@ status: draft
 
 A lot of what we use language models for in production comes down to answering a question with one of a few fixed answers. Is this support ticket urgent or not? Does this transaction look like fraud? Is this error log a bug in our code, or a problem in something we depend on? The usual way to get that answer is to ask the model to write it. The model produces a paragraph and we parse the paragraph, or we ask for JSON and add a retry for when the JSON comes back broken, or we ask the model to rate its own confidence and get back a number it typed rather than one it measured.
 
-In September, TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text at all. You send it some evidence and a question with named options, and it returns a probability for each option. There is nothing to parse, and no confidence to ask for, since the probability is the answer. TypeSafe's [homepage](https://typesafe.ai/) compares it with ordinary language models on three points: "decisions, not strings", with calibrated confidence on every one, 193.6 times faster, and 444.6 times cheaper.
+In September, TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text at all. You send it some evidence and a question with named options, and it returns a probability for each option. There is nothing to parse, and no confidence to ask for, since the probability is the answer. The promise of a model like that is a typed decision with a calibrated confidence attached, returned faster and cheaper than a model that has to write its answer out.
 
 I wanted to know how much of that you can get from an open model that you run yourself, on your own AWS account and in your own region, and what it costs you, so I measured it. To have something real to decide about, I also built a pipeline that reads every error log in an AWS account, decides whether each error comes from our own code and which repository it belongs to, and files a GitHub issue there with a root cause.
 
@@ -191,9 +191,9 @@ Escalation fetches the files the stack frames name through the GitHub Contents A
 
 That issue was filed forty seconds after a Python function threw a `KeyError` on a tier name it did not know. The stack trace named `handler.py`, the pipeline fetched it, the 4B confirmed the code could throw there, and Nova quoted the offending line and described the missing validation. The whole path from log line to issue is a handful of typed decisions and one paragraph of generated text.
 
-## Measuring Jev's Three Claims
+## Speed, Structure and Cost
 
-TypeSafe's homepage makes three comparisons against ordinary language models: 193.6 times faster, "decisions, not strings", and 444.6 times cheaper. Those are Jev against a generating model, so the interesting question is how the 4B on Bedrock, which also does not generate, compares on the same three points, measured from a Lambda in Frankfurt.
+A System One model is sold on three things: it answers quickly, the answer is a typed decision with a confidence attached, and it costs a fraction of a generating model. Those hold for Jev against an ordinary language model. What I wanted to know is how they hold for a self-hosted readout, which also does not generate, so here is each of the three for the 4B on Bedrock, measured from a Lambda in Frankfurt, with Jev's figures alongside as the reference point.
 
 **Fast.** A warm Qwen3-4B answers one question in 0.10 seconds at the median and 0.20 at the 95th percentile. Jev answers in 0.53 seconds, and that figure is the same whether the request carries one question or all eight, since Jev takes them in a single call. The 4B's eight questions run concurrently in the Lambda and cost one round trip. What Jev does not have is the cold start: after five idle minutes, the first request to the 4B fails for thirty to sixty seconds. If your logs arrive in bursts with quiet gaps between them, every burst pays it.
 
@@ -213,7 +213,7 @@ TypeSafe's homepage makes three comparisons against ordinary language models: 19
 | woken once an hour to drain a batch | $257 | 2.6 cents | 60 cents in total |
 | loaded continuously | $3,090 | breaks even with Jev at about fifty million decisions a month, if one copy can serve nineteen a second, which I did not measure | |
 
-Jev is cheaper per decision at every volume I can vouch for. The 4B gives you something else: the weights are yours, the prompt and the chat template are yours, the request never leaves eu-central-1, and there is no third party between your logs and your decision. If your logs cannot leave your region, or your compliance story needs the model to be something you own, the 4B is the option, and the table above is what it costs.
+A hosted service is cheaper per decision at every volume I can vouch for. The self-hosted model gives you something else: the weights are yours, the prompt and the chat template are yours, the request never leaves eu-central-1, and there is no third party between your logs and your decision. If your logs cannot leave your region, or your compliance story needs the model to be something you own, the 4B is the option, and the table above is what it costs.
 
 ## Tradeoffs
 
