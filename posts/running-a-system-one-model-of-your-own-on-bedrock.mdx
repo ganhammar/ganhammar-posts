@@ -30,60 +30,78 @@ A language model produces, at each step, a probability for every token in its vo
 
 The prompt lists the options as lettered choices and tells the model to answer with a single uppercase letter. We ask the model for exactly one token. Rather than reading which token it chose, we read the log probabilities it assigned to `A`, `B`, `C` and so on at that position, and normalise those into a probability per option. The model never writes a sentence, so there is no sentence to parse, and the probability we get is the model's own distribution over the answers rather than a number it was asked to type.
 
-On Bedrock this is a single call to the imported model:
-
-```json
-{
-  "prompt": "<rendered prompt, ending with the assistant turn>",
-  "max_tokens": 1,
-  "temperature": 0,
-  "logprobs": 20
-}
-```
-
-The response carries the twenty most likely tokens at the first position, with their log probabilities. The code looks up each option's letter, treats any letter that did not make the top twenty as having no probability, and applies a softmax. With the error handling trimmed, this is the whole readout:
+On Bedrock the readout is one method, and it reads best in four steps. First the request. The prompt is rendered to a string (more on that below), and the model is asked for one token and the twenty most likely candidates at that position:
 
 ```csharp
-// The top-20 candidates at the first sampled position, keyed by token text
-var byToken = response.GetProperty("choices")[0]
-    .GetProperty("logprobs").GetProperty("top_logprobs")[0]
-    .EnumerateObject()
-    .ToDictionary(p => p.Name, p => p.Value.GetDouble());
+var messages = Semif.DirectMessages(row);
+var letters = Semif.Letters[..options.GetArrayLength()];
 
-// Option i was presented as letter i. A letter outside the top-20 gets -inf
-var logprobs = options
-    .Select((_, i) => byToken.GetValueOrDefault(Letters[i].ToString(), double.NegativeInfinity))
-    .ToList();
-
-// Share of the model's probability that landed on any declared letter
-var declaredMass = logprobs.Where(double.IsFinite).Sum(Math.Exp);
-
-// Softmax over the letters that were present; absent letters stay at 0
-var probabilities = SoftmaxAllowMissing(logprobs);
-
-static double[] SoftmaxAllowMissing(IReadOnlyList<double> logprobs)
+using (var writer = new Utf8JsonWriter(stream))
 {
-    var finite = logprobs.Where(double.IsFinite).ToArray();
-    if (finite.Length == 0) return new double[logprobs.Count];
-    if (finite.Length == 1) return logprobs.Select(v => double.IsFinite(v) ? 1.0 : 0.0).ToArray();
+    writer.WriteStartObject();
+    writer.WriteNumber("max_tokens", 1);
+    writer.WriteNumber("temperature", 0);
+    writer.WriteString("prompt", Semif.RenderQwen3Prompt(messages));
+    writer.WriteNumber("logprobs", TopLogprobs);   // 20
+    writer.WriteEndObject();
+}
 
-    var max = finite.Max();
-    var weights = finite.Select(v => Math.Exp(v - max)).ToArray();
-    var sum = weights.Sum();
-    var present = new Queue<double>(weights.Select(w => w / sum));
-    return logprobs.Select(v => double.IsFinite(v) ? present.Dequeue() : 0.0).ToArray();
+var responseBytes = await invoke(modelArn, requestBody, cancellationToken);
+```
+
+The response has the shape of an OpenAI completion, and the candidates live under `choices[0].logprobs.top_logprobs[0]`, one entry per token text. The second step pulls them out:
+
+```csharp
+var choice = payload.GetProperty("choices")[0];
+var logprobs = choice.GetProperty("logprobs");
+var positions = logprobs.GetProperty("top_logprobs");   // one object per sampled position
+
+var byToken = new Dictionary<string, double>(StringComparer.Ordinal);
+foreach (var property in positions[0].EnumerateObject())
+{
+    byToken[property.Name] = property.Value.GetDouble();
 }
 ```
 
-`declaredMass` is a number I will come back to.
+Third, each option is matched to the letter it was presented as. Option one was `A`, option two was `B`, and so on. A letter that did not make the top twenty gets negative infinity, which is what "no probability" looks like in log space:
 
-> [!NOTE]
-> Bedrock exposes two request shapes for imported models, one modelled
-> on OpenAI's Completions API and one on Chat Completions. The readout
-> uses the first, since it takes a fully rendered prompt. Bedrock also
-> reports `instructSupported: false` for the imported Qwen3 models, so
-> it has not detected a chat template, and sending `messages` and
-> trusting the server to render them is not safe.
+```csharp
+var optionIds = new List<string>();
+var optionLogprobs = new List<double>();
+var index = 0;
+foreach (var option in options.EnumerateArray())
+{
+    optionIds.Add(option.GetProperty("id").GetString()!);
+    optionLogprobs.Add(byLetter.TryGetValue(letters[index].ToString(), out var logprob)
+        ? logprob
+        : double.NegativeInfinity);
+    index++;
+}
+```
+
+Last, the log probabilities become probabilities. Before normalising, the code adds up how much of the model's probability landed on the declared letters at all, which is a number I will come back to. Then a softmax runs over the letters that were present, and absent letters stay at zero:
+
+```csharp
+var declaredMass = optionLogprobs.Where(double.IsFinite).Sum(Math.Exp);
+return new ScoreResult(optionIds, SoftmaxAllowMissing(optionLogprobs), declaredMass);
+
+private static double[] SoftmaxAllowMissing(IReadOnlyList<double> logprobs)
+{
+    var finite = logprobs.Where(double.IsFinite).ToArray();
+    if (finite.Length == 0)
+    {
+        return new double[logprobs.Count];
+    }
+    if (finite.Length == 1)
+    {
+        return logprobs.Select(value => double.IsFinite(value) ? 1.0 : 0.0).ToArray();
+    }
+    var finiteProbabilities = new Queue<double>(Semif.Softmax(finite));
+    return logprobs.Select(value => double.IsFinite(value) ? finiteProbabilities.Dequeue() : 0.0).ToArray();
+}
+```
+
+That is the whole readout. The rest of the file is validation and error messages.
 
 Two details took most of a day to find, and neither of them produces an error.
 
