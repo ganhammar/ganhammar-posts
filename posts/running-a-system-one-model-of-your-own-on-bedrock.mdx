@@ -41,7 +41,41 @@ On Bedrock this is a single call to the imported model:
 }
 ```
 
-The response carries the twenty most likely tokens at the first position, with their log probabilities. The code looks up each option's letter, treats any letter that did not make the top twenty as having no probability, and applies a softmax. That is the whole readout, about forty lines of C#.
+The response carries the twenty most likely tokens at the first position, with their log probabilities. The code looks up each option's letter, treats any letter that did not make the top twenty as having no probability, and applies a softmax. With the error handling trimmed, this is the whole readout:
+
+```csharp
+// The top-20 candidates at the first sampled position, keyed by token text
+var byToken = response.GetProperty("choices")[0]
+    .GetProperty("logprobs").GetProperty("top_logprobs")[0]
+    .EnumerateObject()
+    .ToDictionary(p => p.Name, p => p.Value.GetDouble());
+
+// Option i was presented as letter i. A letter outside the top-20 gets -inf
+var logprobs = options
+    .Select((_, i) => byToken.GetValueOrDefault(Letters[i].ToString(), double.NegativeInfinity))
+    .ToList();
+
+// Share of the model's probability that landed on any declared letter
+var declaredMass = logprobs.Where(double.IsFinite).Sum(Math.Exp);
+
+// Softmax over the letters that were present; absent letters stay at 0
+var probabilities = SoftmaxAllowMissing(logprobs);
+
+static double[] SoftmaxAllowMissing(IReadOnlyList<double> logprobs)
+{
+    var finite = logprobs.Where(double.IsFinite).ToArray();
+    if (finite.Length == 0) return new double[logprobs.Count];
+    if (finite.Length == 1) return logprobs.Select(v => double.IsFinite(v) ? 1.0 : 0.0).ToArray();
+
+    var max = finite.Max();
+    var weights = finite.Select(v => Math.Exp(v - max)).ToArray();
+    var sum = weights.Sum();
+    var present = new Queue<double>(weights.Select(w => w / sum));
+    return logprobs.Select(v => double.IsFinite(v) ? present.Dequeue() : 0.0).ToArray();
+}
+```
+
+`declaredMass` is a number I will come back to.
 
 > [!NOTE]
 > Bedrock exposes two request shapes for imported models, one modelled
