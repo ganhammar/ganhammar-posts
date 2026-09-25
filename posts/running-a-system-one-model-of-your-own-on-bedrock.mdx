@@ -10,7 +10,7 @@ status: draft
 
 A lot of what we use language models for in production comes down to answering a question with one of a few fixed answers. Is this support ticket urgent or not? Does this transaction look like fraud? Is this error log a bug in our code, or a problem in something we depend on? The usual way to get that answer is to ask the model to write it. The model produces a paragraph and we parse the paragraph, or we ask for JSON and add a retry for when the JSON comes back broken, or we ask the model to rate its own confidence and get back a number it typed rather than one it measured.
 
-In September, TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text at all. You send it some evidence and a question with named options, and it returns a probability for each option. There is nothing to parse, and no confidence to ask for, since the probability is the answer. TypeSafe sells it on three things: it is fast, the output is always structured, and it is cheap.
+In September, TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text at all. You send it some evidence and a question with named options, and it returns a probability for each option. There is nothing to parse, and no confidence to ask for, since the probability is the answer. TypeSafe's [homepage](https://typesafe.ai/) compares it with ordinary language models on three points: "decisions, not strings", with calibrated confidence on every one, 193.6 times faster, and 444.6 times cheaper.
 
 I wanted to know how much of that you can get from an open model that you run yourself, on your own AWS account and in your own region, and what it costs you, so I measured it. To have something real to decide about, I also built a pipeline that reads every error log in an AWS account, decides whether each error comes from our own code and which repository it belongs to, and files a GitHub issue there with a root cause.
 
@@ -193,7 +193,7 @@ That issue was filed forty seconds after a Python function threw a `KeyError` on
 
 ## Measuring Jev's Three Claims
 
-TypeSafe says Jev is fast, always structured, and cheap. Here is how the 4B on Bedrock compares on each, measured from a Lambda in Frankfurt.
+TypeSafe's homepage makes three comparisons against ordinary language models: 193.6 times faster, "decisions, not strings", and 444.6 times cheaper. Those are Jev against a generating model, so the interesting question is how the 4B on Bedrock, which also does not generate, compares on the same three points, measured from a Lambda in Frankfurt.
 
 **Fast.** A warm Qwen3-4B answers one question in 0.10 seconds at the median and 0.20 at the 95th percentile. Jev answers in 0.53 seconds, and that figure is the same whether the request carries one question or all eight, since Jev takes them in a single call. The 4B's eight questions run concurrently in the Lambda and cost one round trip. What Jev does not have is the cold start: after five idle minutes, the first request to the 4B fails for thirty to sixty seconds. If your logs arrive in bursts with quiet gaps between them, every burst pays it.
 
