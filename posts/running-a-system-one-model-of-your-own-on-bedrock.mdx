@@ -43,6 +43,14 @@ On Bedrock this is a single call to the imported model:
 
 The response carries the twenty most likely tokens at the first position, with their log probabilities. The code looks up each option's letter, treats any letter that did not make the top twenty as having no probability, and applies a softmax. That is the whole readout, about forty lines of C#.
 
+> [!NOTE]
+> Bedrock exposes two request shapes for imported models, one modelled
+> on OpenAI's Completions API and one on Chat Completions. The readout
+> uses the first, since it takes a fully rendered prompt. Bedrock also
+> reports `instructSupported: false` for the imported Qwen3 models, so
+> it has not detected a chat template, and sending `messages` and
+> trusting the server to render them is not safe.
+
 Two details took most of a day to find, and neither of them produces an error.
 
 The first is the chat template. Qwen3 is a reasoning model, and its packaged template ends the prompt at the start of the assistant's turn, which leaves the model free to open a `<think>` block. When it does, the first sampled token is the start of that block, and the distribution we read is over ways to begin thinking rather than over answer letters. The fix is to render the prompt ourselves and close an empty reasoning block inside it:
@@ -53,6 +61,12 @@ public const string QwenThinkSuppressedSuffix = "<|im_start|>assistant\n<think>\
 
 With that suffix in place the answer letter is the first thing the model can produce. It is the same string Qwen's own tooling emits when thinking is disabled, and it is the reason the function renders the prompt locally instead of letting Bedrock apply the model's template.
 
+> [!NOTE]
+> The prompt strings are kept byte-identical to SemIf's, so the SHA-256
+> of a rendered prompt can be compared with that project's published
+> results. That is also why the C# serialises the state the way Python's
+> `json.dumps` does, down to the separators and number formatting.
+
 The second is the `logprobs` field. On the request shape Bedrock uses for imported models it is an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else, every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. I found it by sending both forms and counting the candidates that came back: one against twenty.
 
 Those two failures are the reason the readout tracks one more number, which I call declared mass: the share of the model's probability that landed on the option letters at all, before normalising. When everything works it is 1.0000 at the median and 0.9996 at the minimum across the test set, so the model is putting essentially all of its probability on the letters we declared. When it drops, the model is answering some other question, and the normalised probabilities are a ratio of two small numbers presented as a decision. Jev does not expose this number. The readout does, and it is the first thing I look at when a result seems wrong.
@@ -61,7 +75,20 @@ Those two failures are the reason the readout tracks one more number, which I ca
 
 Custom Model Import takes a folder of model weights from S3 and gives you back a model that you call through the normal Bedrock runtime API. It supports a fixed list of architectures, Qwen3 among them, and it runs in four regions, of which Frankfurt is the only one in Europe. There is no CloudFormation resource for it, so the import is a script run once from a GitHub Actions workflow: download the weights from Hugging Face one file at a time, upload each to S3, start the import job, and poll until it finishes. Qwen3-4B is eight gigabytes.
 
+> [!NOTE]
+> The supported list names the architecture, not the model family. For
+> Qwen that means `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`. A Qwen3.5
+> checkpoint reports a different architecture and the import job
+> rejects it, which is how this project ended up on Qwen3.
+
 The billing model is worth understanding before building on it. An imported model is charged per Custom Model Unit per minute while a copy of it is awake, in five-minute windows, and a copy goes to sleep after five minutes without a request. Qwen3-4B is one unit, which in Frankfurt costs $0.07144 a minute. The first request after a sleep does not wait for the copy to wake up. It fails, and keeps failing for thirty to sixty seconds, until the copy is ready. The pipeline's state machine retries the decision step with a backoff that spans about five minutes for this reason, and the first log after a quiet spell needed four attempts before it got an answer.
+
+> [!NOTE]
+> The failures during a wake-up are not all the same. The first ones are
+> `ModelNotReadyException`, which the documentation tells you to retry.
+> The last one before it came up was `ModelErrorException` with the
+> message "the request failed in the model container", which reads like
+> a bug in the request and is only the copy still loading. Retry both.
 
 ## Does It Decide Anything
 
@@ -116,9 +143,23 @@ The rest of the system exists so that the decision has somewhere to go. The arch
 
 An account-level subscription filter on CloudWatch Logs forwards every log event containing an error marker into a Kinesis stream. The filter excludes the pipeline's own two log groups by name, because a triage system that logs its triage and then triages its own logs is a billing incident waiting to happen. A Lambda function reads the stream in batches, parses each stack trace with a small regular expression per runtime, and reduces it to a fingerprint: the exception type plus the frames that belong to the application rather than to a library. A conditional counter in DynamoDB records the sighting, and only a fingerprint's first sighting starts a state machine execution, so from here on it is one execution per new defect.
 
+> [!NOTE]
+> The Python Lambda runtime logs an unhandled exception as one event
+> with the lines joined by a bare carriage return, and it puts the
+> exception line first, behind an `[ERROR]` prefix, where a native
+> Python traceback has it last. The parser handles both shapes, and the
+> demo function is what surfaced the difference.
+
 The execution asks the model the eight questions concurrently when the event carries evidence, or the single question when it carries only a trace, combines the answers, and routes on the result. Below 0.3 the error is probably not ours and the execution ends. Between 0.3 and 0.7 it is held. Above 0.7 it escalates. A rate cap per repository and a global circuit breaker sit in front of escalation, because a bad deploy that breaks fifty services at once should page someone rather than open fifty issues at three in the morning.
 
 Escalation fetches the files the stack frames name through the GitHub Contents API, five at most, and never clones anything. For each frame it asks the 4B one more typed question, "could this code throw this exception here", which catches a checkout that does not match the trace. It then sends the trace and the fetched files to Amazon Nova 2 Lite through the Converse API, the one generative call in the whole pipeline, and asks for a root cause in at most three sentences. The result is an issue:
+
+> [!NOTE]
+> Nova has to be called through its cross-region inference profile,
+> `eu.amazon.nova-2-lite-v1:0`, not the bare model id. The bare id is
+> not enabled for on-demand use in Frankfurt, and the profile keeps the
+> request inside EU regions. The IAM grant then needs both the profile
+> and the underlying foundation model in every region it can route to.
 
 ![Issue filed by the pipeline](./assets/system-one-issue.png)
 
@@ -131,6 +172,12 @@ TypeSafe says Jev is fast, always structured, and cheap. Here is how the 4B on B
 **Fast.** A warm Qwen3-4B answers one question in 0.10 seconds at the median and 0.20 at the 95th percentile. Jev answers in 0.53 seconds, and that figure is the same whether the request carries one question or all eight, since Jev takes them in a single call. The 4B's eight questions run concurrently in the Lambda and cost one round trip. What Jev does not have is the cold start: after five idle minutes, the first request to the 4B fails for thirty to sixty seconds. If your logs arrive in bursts with quiet gaps between them, every burst pays it.
 
 **Structured.** Both return a probability per option. Jev's come rounded to two decimals, with a separate confidence field. The readout's come from the logit distribution directly, and with them comes the declared mass, which is the number that told me Mistral was answering a different question. On calibration, measured as expected calibration error where lower is better, the 4B's single question scores 0.21, its eight questions score 0.08 on the tuned rows and 0.26 on the held-out rows, and Jev scores 0.14 on the tuned rows and 0.06 on the held-out rows.
+
+> [!NOTE]
+> The Jev comparison is not perfectly like for like. Jev received the
+> option descriptions as its own named criteria and applied its own
+> prompting, while the Bedrock path sends a frozen prompt. It is a fair
+> reference point for the same rows, not the same prompt on two models.
 
 **Cheap.** Jev charges $0.042 per million input tokens and nothing for output. An eight-question request measured about 1,450 tokens, so a full triage decision costs six thousandths of a cent, and a single question about a third of that. The 4B's cost depends on how long a copy is awake rather than on how many decisions it makes:
 
