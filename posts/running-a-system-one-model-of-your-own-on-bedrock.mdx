@@ -77,9 +77,9 @@ return new ScoreResult(optionIds, SoftmaxAllowMissing(optionLogprobs), declaredM
 
 ## Two Things That Fail Quietly
 
-Two details took most of a day to find, and neither of them produces an error.
+It took most of a day to get sensible numbers out of the readout, because two things were wrong and neither of them produced an error.
 
-The first is the chat template. Qwen3 is a reasoning model, and its packaged template ends the prompt at the start of the assistant's turn, which leaves the model free to open a `<think>` block. When it does, the first sampled token is the start of that block, and the distribution we read is over ways to begin thinking rather than over answer letters. The fix is to render the prompt ourselves and close an empty reasoning block inside it:
+The chat template was the first. Qwen3 is a reasoning model, and its packaged template ends the prompt at the start of the assistant's turn, which leaves the model free to open a `<think>` block. When it does, the first sampled token is the start of that block, and the distribution we read is over ways to begin thinking rather than over answer letters. The fix is to render the prompt ourselves and close an empty reasoning block inside it:
 
 ```csharp
 public const string QwenThinkSuppressedSuffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
@@ -93,9 +93,9 @@ With that suffix in place the answer letter is the first thing the model can pro
 > results. That is also why the C# serialises the state the way Python's
 > `json.dumps` does, down to the separators and number formatting.
 
-The second is the `logprobs` field. On the request shape Bedrock uses for imported models it is an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else, every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. I found it by sending both forms and counting the candidates that came back: one against twenty.
+The `logprobs` field was the other. On the request shape Bedrock uses for imported models it is an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else, every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. I found it by sending both forms and counting the candidates that came back: one against twenty.
 
-Those two failures are the reason the readout keeps the declared mass: the share of the model's probability that landed on the option letters at all, before normalising. When everything works it is 1.0000 at the median and 0.9996 at the minimum across the test set, so the model is putting essentially all of its probability on the letters we declared. When it drops, the model is answering some other question, and the normalised probabilities are a ratio of two small numbers presented as a decision. Jev does not expose this number. The readout does, and it is the first thing I look at when a result seems wrong.
+Having been caught twice by answers that looked fine, I made the readout report the declared mass as well: the share of the model's probability that landed on the option letters at all, before normalising. When everything works it is 1.0000 at the median and 0.9996 at the minimum across the test set, so the model is putting essentially all of its probability on the letters we declared. When it drops, the model is answering some other question, and the normalised probabilities are a ratio of two small numbers presented as a decision. Jev does not expose this number. The readout does, and it is the first thing I look at when a result seems wrong.
 
 ## Getting a Model into Bedrock
 
@@ -132,7 +132,7 @@ With a single question, "is this a defect in this service's own code or a failur
 | Qwen3-32B | 6 of 12 | 3 of 12 |
 | Jev | 8 of 12 | 4 of 12 |
 
-The interesting comparison is between the two columns. The 4B gets the same five rows right with the evidence and without it, and on the rows it misses most confidently it reports a probability of exactly zero either way, which means it is not using the evidence at all. The 32B and Jev both drop sharply when the evidence is removed, so they are using it, but the 32B still ends up at six of twelve, and six of twelve is a coin toss. The 32B has eight times the parameters of the 4B and gets one more row right.
+The 4B gets the same five rows right with the evidence and without it, and on the rows it misses most confidently it reports a probability of exactly zero either way, which means it is not using the evidence at all. The 32B and Jev both drop sharply when the evidence is removed, so they are using it, but the 32B still ends up at six of twelve, and six of twelve is a coin toss. The 32B has eight times the parameters of the 4B and gets one more row right.
 
 The 4B also cannot compare two numbers. Asked directly whether 2,841 connections acquired against 12 released is "far more often", it answers yes with probability one. Asked whether a 3,600 second refresh interval is longer than a 900 second token lifetime, it answers no with probability one. Rephrasing the question did not help. Since the pipeline is code, I moved the arithmetic into code. A small step walks the evidence, finds the relations worth naming, and states each of them as a sentence before the model sees the row, along the lines of "connections_opened is 237 times connections_disposed (2841 against 12)". The model is then asked what a stated comparison means, which it can do, instead of being asked to compute it.
 
@@ -151,9 +151,9 @@ So I wrote twelve more rows after the questions were frozen, and ran everything 
 
 Jev reads the evidence and gets every row from the single question, and the eight-question version adds nothing for it. The 4B with the eight questions scores below the trace alone, so with the evidence in front of it, it does worse than without. The gain on the tuned rows did not carry over.
 
-The four misses share a pattern. Anything in the evidence that changed gets attributed to someone else. Our own deploy, two minutes before the errors started, reads as an external change. Our own retry policy, sending sixty times the usual traffic, with the sentence "3900 is 60 times 65" stated in front of the model, reads as the dependency failing. Our own timeout, lowered from ten seconds to two, reads as the platform intervening. The 4B registers that something changed but not who changed it. Jev does.
+In all four rows it got wrong, something in the evidence had changed and the 4B attributed the change to someone else. Our own deploy, two minutes before the errors started, reads as an external change. Our own retry policy, sending sixty times the usual traffic, with the sentence "3900 is 60 times 65" stated in front of the model, reads as the dependency failing. Our own timeout, lowered from ten seconds to two, reads as the platform intervening. The 4B registers that something changed but not who changed it, and Jev works that out from the same text.
 
-I prefer that result to the one I had the day before, because it says where the gap is. The readout mechanism works on an open model. Breaking the question down lets a small model match a purpose-trained one on cases it has been tuned against. On cases it has not seen, the purpose-trained model wins, and the gap is in how well the model reads the evidence, not in the mechanism.
+It is a less flattering result than the one from the day before, and a more useful one, since it shows where the gap is. The readout mechanism works on an open model. Breaking the question down lets a small model match a purpose-trained one on cases it has been tuned against. On cases it has not seen, the purpose-trained model wins, and the gap is in how well the model reads the evidence, not in the mechanism.
 
 ## Why the Model Choice Matters
 
@@ -165,7 +165,7 @@ Mistral is not a worse model for this. With its best prompt it scored 22 of 32 o
 
 ## The Pipeline in One Pass
 
-The rest of the system exists so that the decision has somewhere to go. The architecture document in the repository has the detail; this is the shape.
+The rest of the system is there to give the decision somewhere to go. I will keep to the shape of it here, since the architecture document in the repository has the detail.
 
 An account-level subscription filter on CloudWatch Logs forwards every log event containing an error marker into a Kinesis stream. The filter excludes the pipeline's own two log groups by name, because a triage system that logs its triage and then triages its own logs is a billing incident waiting to happen. A Lambda function reads the stream in batches, parses each stack trace with a small regular expression per runtime, and reduces it to a fingerprint: the exception type plus the frames that belong to the application rather than to a library. A conditional counter in DynamoDB records the sighting, and only a fingerprint's first sighting starts a state machine execution, so from here on it is one execution per new defect.
 
@@ -217,9 +217,9 @@ Jev is cheaper per decision at every volume I can vouch for. The 4B gives you so
 
 ## Tradeoffs
 
-The cold start cannot be hidden by code. Anything built on Custom Model Import at low volume either accepts a failed first request after every quiet spell, or keeps the copy awake and pays for it.
+There is no code fix for the cold start. Anything built on Custom Model Import at low volume either accepts a failed first request after every quiet spell, or keeps the copy awake and pays for it.
 
-The 4B does not work out who changed something. The held-out result is clear on this. Given evidence that says a change was ours, it registers the change and blames someone else. Moving the arithmetic and the identity comparisons into code helped on the rows I could tune against and did not generalise, while a purpose-trained model handles the same text without help. Breaking the question down is still worth doing, since it is what makes the probabilities calibrated enough to route on, but it does not close that gap.
+The 4B does not work out who changed something, as the held-out rows showed. Given evidence that says a change was ours, it registers the change and blames someone else. Moving the arithmetic and the identity comparisons into code helped on the rows I could tune against and did not generalise, while a purpose-trained model handles the same text without help. Breaking the question down is still worth doing, since it is what makes the probabilities calibrated enough to route on, but it does not close that gap.
 
 The evidence is not being gathered yet. The ambiguous rows carry evidence I wrote by hand. A CloudWatch log event carries a message and a log group, so the deployed pipeline today sees a stack trace and nothing else, and on the held-out rows that trace-only path scores 9 of 12 for the 4B and 10 of 12 for Jev. Correlating a trace with metrics, deploys and dependency health at the moment it fired is the next piece of work, and it is not a small one.
 
