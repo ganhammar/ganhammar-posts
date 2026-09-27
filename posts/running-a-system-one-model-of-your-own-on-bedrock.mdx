@@ -8,7 +8,7 @@ status: draft
 
 # Running a System One Model of Your Own on Amazon Bedrock
 
-Outside of chat, a lot of what we use language models for in production comes down to picking one of a few fixed answers. Is this support ticket urgent? Is this error log a bug in our code, or a problem in something we depend on? The usual way to get that answer is to ask the model to write it out. We ask for JSON and add a retry for when it comes back broken. If we want a confidence, we ask for one and get a number the model made up on the spot.
+Outside of chat, a lot of what we use language models for in production comes down to picking one of a few fixed answers. Is this support ticket urgent? Does this transaction look like fraud? Is this product review spam? Or, in our case, is this error log a bug in our code? The usual way to get that answer is to ask the model to write it out. We ask for JSON and add a retry for when it comes back broken. If we want a confidence, we ask for one and get a number the model made up on the spot.
 
 Earlier this month TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text. You send it some evidence and a question with named options, and it returns a probability for each option. The promise is a typed decision with a confidence attached, faster and cheaper than a model that has to write its answer out.
 
