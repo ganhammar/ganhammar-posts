@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" id="s1-arch" viewBox="0 0 960 520" width="960" height="520" role="img" aria-label="Log triage pipeline from CloudWatch Logs to a GitHub issue">
+<style>
+  /* Every rule is scoped to the root id, because the site inlines this file and an
+     inline style block is document-wide. Colours come from the site's tokens when
+     inlined, with the light palette as the fallback for a standalone render. */
+  #s1-arch {
+    --d-paper: var(--paper, #fbfbf9);
+    --d-ink: var(--ink, #14161a);
+    --d-ink-2: var(--ink-2, #565b62);
+    --d-ink-3: var(--ink-3, #9ba1a7);
+    --d-accent: var(--accent, #c8321e);
+    --d-plate: var(--code-inline-bg, #f1f0ec);
+    --d-label: var(--label, "Avenir Next Condensed", "Helvetica Neue", system-ui, sans-serif);
+    --d-mono: var(--mono, ui-monospace, "SF Mono", Menlo, monospace);
+  }
+  @media (prefers-color-scheme: dark) {
+    #s1-arch {
+      --d-paper: var(--paper, #15171a);
+      --d-ink: var(--ink, #e6e4df);
+      --d-ink-2: var(--ink-2, #a5a29b);
+      --d-ink-3: var(--ink-3, #6e6c67);
+      --d-accent: var(--accent, #e8674e);
+      --d-plate: var(--code-inline-bg, #23262b);
+    }
+  }
+  #s1-arch text { font-family: var(--d-label); }
+  #s1-arch .mono { font-family: var(--d-mono); }
+  #s1-arch .bg { fill: var(--d-paper); }
+  #s1-arch .box { fill: var(--d-paper); stroke: var(--d-ink); stroke-width: 1; }
+  #s1-arch .box.accent { stroke: var(--d-accent); stroke-width: 1.4; }
+  #s1-arch .box.soft { fill: var(--d-plate); stroke: var(--d-ink-3); stroke-width: .8; }
+  #s1-arch .container { fill: none; stroke: var(--d-ink-3); stroke-width: .8; stroke-dasharray: 5 4; }
+  #s1-arch .label { letter-spacing: .14em; fill: var(--d-ink); font-size: 13.5px; text-transform: uppercase; }
+  #s1-arch .label.accent { fill: var(--d-accent); }
+  #s1-arch .label.soft { fill: var(--d-ink-2); font-size: 11.5px; }
+  #s1-arch .detail { letter-spacing: .05em; fill: var(--d-ink-3); font-size: 9.6px; }
+  #s1-arch .detail.accent { fill: var(--d-accent); }
+  #s1-arch .title { letter-spacing: .26em; fill: var(--d-ink-3); font-size: 9.6px; }
+  #s1-arch .edge { fill: none; stroke: var(--d-ink-2); stroke-width: .8; }
+  #s1-arch .edge.accent { stroke: var(--d-accent); }
+  #s1-arch .head { fill: var(--d-ink-2); }
+  #s1-arch .head.accent { fill: var(--d-accent); }
+  #s1-arch .edge-label { letter-spacing: .08em; fill: var(--d-ink-3); font-size: 9.2px; }
+  #s1-arch .edge-label.accent { fill: var(--d-accent); }
+  #s1-arch .readout { letter-spacing: .1em; fill: var(--d-accent); font-size: 10.5px; }
+</style>
+<rect class="bg" x="0" y="0" width="960" height="520"/>
+<rect class="box" x="40" y="60" width="190" height="60"/>
+<text class="label" x="54" y="90.0">CloudWatch Logs</text>
+<text class="detail mono" x="54" y="106.0">account-level subscription</text>
+<rect class="box" x="270" y="60" width="160" height="60"/>
+<text class="label" x="284" y="90.0">Kinesis stream</text>
+<text class="detail mono" x="284" y="106.0">every error marker</text>
+<rect class="box" x="470" y="60" width="190" height="60"/>
+<text class="label" x="484" y="90.0">Lambda, native AOT</text>
+<text class="detail mono" x="484" y="106.0">parse, fingerprint</text>
+<path class="box" d="M720,67 a95.0,7 0 0 1 190,0 v46 a95.0,7 0 0 1 -190,0 z"/>
+<path class="box" d="M720,67 a95.0,7 0 0 0 190,0"/>
+<text class="label" x="734" y="92.0">DynamoDB</text>
+<text class="detail mono" x="734" y="108.0">sightings per fingerprint</text>
+<path class="edge" d="M230,90 L270,90"/>
+<path class="head" d="M264,86.4 L264,93.6 L270,90 Z"/>
+<path class="edge" d="M430,90 L470,90"/>
+<path class="head" d="M464,86.4 L464,93.6 L470,90 Z"/>
+<path class="edge" d="M660,90 L720,90"/>
+<path class="head" d="M714,86.4 L714,93.6 L720,90 Z"/>
+<rect class="container" x="40" y="170" width="880" height="206"/>
+<text class="title mono" x="54" y="190">STEP FUNCTIONS · ONE EXECUTION PER NEW FINGERPRINT</text>
+<path class="edge" d="M565,120 L565,170"/>
+<path class="head" d="M561.4,164 L568.6,164 L565,170 Z"/>
+<text class="edge-label mono" x="575" y="154" text-anchor="start">first sighting only</text>
+<rect class="box accent" x="70" y="220" width="230" height="90"/>
+<text class="label accent" x="84" y="250">Qwen3-4B on Bedrock</text>
+<text class="detail mono accent" x="84" y="266">custom model import, one token</text>
+<line class="edge accent" x1="84" y1="278" x2="286" y2="278" stroke-dasharray="2 3"/>
+<text class="readout mono" x="84" y="297">A 0.947   B 0.053</text>
+<polygon class="box" points="400,230.0 450.0,265 400,300.0 350.0,265"/>
+<text class="label" x="400" y="270" text-anchor="middle">P(ours)</text>
+<path class="edge" d="M300,265 L350,265"/>
+<path class="head" d="M344,261.4 L344,268.6 L350,265 Z"/>
+<rect class="box soft" x="320" y="322" width="80" height="44"/>
+<text class="label soft" x="334" y="344.0">Drop</text>
+<text class="detail mono soft" x="334" y="360.0">below 0.3</text>
+<rect class="box soft" x="420" y="322" width="100" height="44"/>
+<text class="label soft" x="434" y="344.0">Hold</text>
+<text class="detail mono soft" x="434" y="360.0">0.3 to 0.7</text>
+<path class="edge" d="M385,300 L385,308 L360,308 L360,322"/>
+<path class="head" d="M356.4,316 L363.6,316 L360,322 Z"/>
+<path class="edge" d="M415,300 L415,308 L470,308 L470,322"/>
+<path class="head" d="M466.4,316 L473.6,316 L470,322 Z"/>
+<rect class="box" x="560" y="235" width="200" height="60"/>
+<text class="label" x="574" y="265.0">Rate cap, breaker</text>
+<text class="detail mono" x="574" y="281.0">per repository, per hour</text>
+<path class="edge accent" d="M450,265 L560,265"/>
+<path class="head accent" d="M554,261.4 L554,268.6 L560,265 Z"/>
+<text class="edge-label mono accent" x="505" y="259" text-anchor="middle">above 0.7</text>
+<path class="edge accent" d="M760,265 L900,265 L900,395 L135,395 L135,420"/>
+<path class="head accent" d="M131.4,414 L138.6,414 L135,420 Z"/>
+<text class="edge-label mono accent" x="890" y="257" text-anchor="end">escalate</text>
+<rect class="box" x="40" y="420" width="200" height="60"/>
+<text class="label" x="54" y="450.0">GitHub Contents API</text>
+<text class="detail mono" x="54" y="466.0">named in the trace, from main</text>
+<rect class="box accent" x="270" y="420" width="200" height="60"/>
+<text class="label accent" x="284" y="450.0">Verify each frame</text>
+<text class="detail mono accent" x="284" y="466.0">qwen3-4b, could it throw here</text>
+<rect class="box" x="500" y="420" width="200" height="60"/>
+<text class="label" x="514" y="450.0">Nova 2 Lite</text>
+<text class="detail mono" x="514" y="466.0">root cause, three sentences</text>
+<path class="box" d="M730,420 h178 l12,12 v48 h-190 z"/>
+<path class="box" d="M908,420 v12 h12"/>
+<text class="label" x="744" y="450.0">GitHub issue</text>
+<text class="detail mono" x="744" y="466.0">in the named repository</text>
+<path class="edge" d="M240,450 L270,450"/>
+<path class="head" d="M264,446.4 L264,453.6 L270,450 Z"/>
+<path class="edge" d="M470,450 L500,450"/>
+<path class="head" d="M494,446.4 L494,453.6 L500,450 Z"/>
+<path class="edge" d="M700,450 L730,450"/>
+<path class="head" d="M724,446.4 L724,453.6 L730,450 Z"/>
+</svg>
