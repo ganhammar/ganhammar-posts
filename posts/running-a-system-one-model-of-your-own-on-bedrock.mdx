@@ -8,17 +8,17 @@ status: draft
 
 # Running a System One Model of Your Own on Amazon Bedrock
 
-Outside of chat, a lot of what we use language models for in production comes down to picking one of a few fixed answers. Is this support ticket urgent? Does this transaction look like fraud? Is this error log a bug in our code, or a problem in something we depend on? The usual way to get that answer is to ask the model to write it out. We get a paragraph and parse it, or we ask for JSON and add a retry for when the JSON comes back broken, or we ask the model how confident it is and get back a number it made up on the spot.
+Outside of chat, a lot of what we use language models for in production comes down to picking one of a few fixed answers. Is this support ticket urgent? Is this error log a bug in our code, or a problem in something we depend on? The usual way to get that answer is to ask the model to write it out. We ask for JSON and add a retry for when it comes back broken. If we want a confidence, we ask for one and get a number the model made up on the spot.
 
 Earlier this month TypeSafe AI released [Jev](https://docs.typesafe.ai/models), which they describe as a System One model, after Daniel Kahneman's split between fast intuitive judgement and slow deliberate reasoning. Jev does not generate text. You send it some evidence and a question with named options, and it returns a probability for each option. The promise is a typed decision with a confidence attached, faster and cheaper than a model that has to write its answer out.
 
 I wanted to know how much of that you can get from an open model you run yourself, on your own AWS account, in your own region, and what it costs. To have something real to decide about, I built a pipeline that reads every error log in an AWS account, decides whether each error comes from our own code, and files a GitHub issue with a root cause when it does.
 
-TLDR: the readout technique works on an open model, but a small open model did not keep up with Jev on cases it had not been tuned against, and at low volume it is not the cheaper option either.
+TLDR: the readout technique works on an open model, but a small open model didn't keep up with Jev on cases it hadn't been tuned against, and at low volume it isn't the cheaper option either.
 
 ## What We Are Building
 
-The workload is log triage. Every log group in an AWS account is captured. Every error is parsed and reduced to a fingerprint, so that one defect firing ten thousand times is triaged once. Each new fingerprint gets a single typed decision. Is this a defect in the service's own code, or a failure in something outside it, such as a dependency it calls or the platform it runs on? The rule behind the label is where the fix belongs. An error is ours if a change to this repository resolves it, which includes input the code failed to validate or handle, and external if no change to this repository would. When the decision says ours with enough confidence, the pipeline fetches the source files the stack trace names, checks that the code could have thrown that exception where the trace says it did, has a larger model, Amazon Nova 2 Lite, write a root cause paragraph, and opens an issue in the repository. Which repository is a naming convention, so a log group called `/aws/lambda/billing-sync` is assumed to belong to a repository called `billing-sync` in the configured GitHub organisation.
+The workload is log triage. Every log group in an AWS account is captured. Every error is parsed and reduced to a fingerprint, so that one defect firing ten thousand times is triaged once. Each new fingerprint gets a single typed decision. Is this a defect in the service's own code, or a failure in something outside it, such as a dependency it calls or the platform it runs on? The rule behind the label is where the fix belongs. An error is ours if a change to this repository resolves it, which includes input the code failed to validate or handle, and external if no change to this repository would. When the decision says ours with enough confidence, the pipeline fetches the source files the stack trace names and checks that the code could have thrown that exception where the trace says it did. Then Amazon Nova 2 Lite, a larger model, writes a root cause paragraph, and the pipeline opens an issue in the repository. Which repository is a naming convention, so a log group called `/aws/lambda/billing-sync` is assumed to belong to a repository called `billing-sync` in the configured GitHub organisation.
 
 ![Architecture diagram. CloudWatch Logs feeds Kinesis and a Lambda that fingerprints each error and records it in DynamoDB. A Step Functions execution per new fingerprint asks Qwen3-4B on Bedrock for a probability, drops or holds below 0.7, and above it escalates through a rate cap to fetch the named files from GitHub, verify each frame with the 4B, write a root cause with Nova 2 Lite and file a GitHub issue.](./assets/system-one-architecture.svg)
 
@@ -26,7 +26,7 @@ Most of the pipeline is ordinary serverless plumbing: a Kinesis stream fed by a 
 
 The model in that box is Qwen3-4B, a four billion parameter open model, imported into Amazon Bedrock with Custom Model Import. The technique for reading a decision out of it is borrowed from [SemIf](https://github.com/TheoLeeCJ/SemIf-OpenJev), an open reproduction of the Jev interface, which I ported to C#.
 
-One thing to know before any of the numbers. A CloudWatch log event carries a message and a log group name and nothing else, so what the deployed pipeline hands the model is a stack trace. Much of the evaluation below also gives the model evidence about what was going on around the error, such as connection counts, recent deploys, and what a dependency returned. That evidence exists only in the test rows. Nothing in the pipeline gathers it yet, and the next step to turn this proof-of-concept into something real would have been to gather it. So there are two paths through the code, trace only and trace with evidence.
+A CloudWatch log event carries a message and a log group name and nothing else, so what the deployed pipeline hands the model is a stack trace. Much of the evaluation below also gives the model evidence about what was going on around the error, such as connection counts, recent deploys, and what a dependency returned. That evidence exists only in the test rows. Nothing in the pipeline gathers it yet. That's the next step toward turning this proof-of-concept into something real. So there are two paths through the code, trace only and trace with evidence.
 
 ## How the Readout Works
 
@@ -45,7 +45,7 @@ writer.WriteNumber("logprobs", 20);
 writer.WriteEndObject();
 ```
 
-The response has the shape of an OpenAI completion, with the candidates under `choices[0].logprobs.top_logprobs[0]`, one entry per token text. Each option is matched to the letter it was presented as. A letter that did not make the top twenty is given negative infinity, which converts back to a probability of zero (we treat that option as ruled out). That is a choice rather than a measurement. The API did not report the letter, so we do not know its probability, only that it was smaller than the twentieth candidate's.
+The response has the shape of an OpenAI completion, with the candidates under `choices[0].logprobs.top_logprobs[0]`, one entry per token text. Each option is matched to the letter it was presented as. A letter that didn't make the top twenty is given negative infinity, which converts back to a probability of zero. The API didn't report the letter, so we only know its probability was below the twentieth candidate's. Zero is an assumption.
 
 ```csharp
 var byToken = payload.GetProperty("choices")[0]
@@ -64,7 +64,7 @@ foreach (var option in options.EnumerateArray())
 }
 ```
 
-Last, the option probabilities are scaled so that they add up to one. Say the model gave `A` 0.90 and `B` 0.05. Together that is 0.95, and the missing 0.05 went to tokens that were not options at all, such as a newline or the word "The". Dividing both by 0.95 gives `A` 0.947 and `B` 0.053, which add up to one and read as a decision between the two. Before that scaling, the code also keeps the 0.95 itself, which the code calls the declared mass. It is how much of the model's probability landed on the given options, summed up. When the model answers with a letter, as asked, that sum is close to 1. When it wants to say something else first, the sum is small, and the scaled-up probabilities are a ratio of two small numbers presented as a decision. A high sum says the model answered in the right form, not that it understood the question. Keep that number in mind, it comes up again in the next section.
+Last, the option probabilities are scaled so that they add up to one. Say the model gave `A` 0.90 and `B` 0.05. Together that is 0.95, and the missing 0.05 went to tokens that weren't options at all, such as a newline or the word "The". Dividing both by 0.95 gives `A` 0.947 and `B` 0.053, which add up to one and read as a decision between the two. Before that scaling, the code also keeps the 0.95 itself, which the code calls the declared mass. It's how much of the model's probability landed on the given options, summed up. When the model answers with a letter, as asked, that sum is close to 1. When it wants to say something else first, the sum is small, and the scaled-up probabilities are a ratio of two small numbers presented as a decision. A high sum says the model answered in the right form, not that it understood the question.
 
 ```csharp
 var declaredMass = optionLogprobs.Where(double.IsFinite).Sum(Math.Exp);
@@ -78,8 +78,8 @@ return new ScoreResult(optionIds, SoftmaxAllowMissing(optionLogprobs), declaredM
 > on OpenAI's Completions API and one on Chat Completions. The readout
 > uses the first, since it takes a fully rendered prompt. Bedrock also
 > reports `instructSupported: false` for the imported Qwen3 models, so
-> it has not detected a chat template, and sending `messages` and
-> trusting the server to render them is not safe.
+> it hasn't detected a chat template, and sending `messages` and
+> trusting the server to render them isn't safe.
 
 ## Getting the Readout to Work
 
@@ -91,35 +91,35 @@ The chat template was the first. Qwen3 is a reasoning model, and its packaged te
 public const string QwenThinkSuppressedSuffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
 ```
 
-With that suffix in place the answer letter is the first thing the model can produce. It is the same string Qwen's own tooling emits when thinking is disabled.
+With that suffix in place the answer letter is the first thing the model can produce. It's the same string Qwen's own tooling emits when thinking is disabled.
 
 > [!NOTE]
 > The prompt strings are kept byte-identical to SemIf's, so the SHA-256
 > of a rendered prompt can be compared with that project's published
-> results. That is also why the C# serialises the state the way Python's
+> results. That's also why the C# serialises the state the way Python's
 > `json.dumps` does, down to the separators and number formatting.
 
-The `logprobs` field was the second. On the request shape Bedrock uses for imported models it is an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else. Every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. Sending both forms and putting the raw responses side by side showed it. One came back with a single candidate, the other with twenty.
+The `logprobs` field was the second. On the request shape Bedrock uses for imported models it's an integer, the number of candidates to return. Sending `true`, which is what the chat-style API expects, is accepted without complaint and treated as one. You then get the single most likely token and nothing else. Every option but the winner reads as missing, and the probabilities look plausible while meaning nothing. I only caught it by sending both forms and comparing the raw responses. One came back with a single candidate, the other with twenty.
 
-The third was the model itself. Qwen3 was chosen because it is one of the architectures Bedrock's Custom Model Import accepts, not for any measured property. To see how much that mattered, Mistral-7B-Instruct went through the same import and the same rows. Rendered through Mistral's own chat template, the model put no probability at all on the option letters. Declared mass was 0.0000. Its most likely first token was `**`, at probability 0.0009, because it was opening a bold heading to explain its answer, which is what it had been trained to do. Adding a trailing space to the prompt raised the mass to 0.155 and made a letter the most likely token. The best lead-in I found, ending the prompt with "The answer is", reached 0.24. Qwen3 reaches 1.0000 with no lead-in at all.
+The third was the model itself. We picked Qwen3 because Custom Model Import accepts it, and for no other reason. To see how much that mattered, we ran Mistral-7B-Instruct through the same import and the same rows. Rendered through Mistral's own chat template, the model put no probability at all on the option letters. Declared mass was 0.0000. Its most likely first token was `**`, at probability 0.0009, because it was opening a bold heading to explain its answer, which is what it had been trained to do. Adding a trailing space to the prompt raised the mass to 0.155 and made a letter the most likely token. The best lead-in I found, ending the prompt with "The answer is", reached 0.24. Qwen3 reaches 1.0000 with no lead-in at all.
 
-Mistral is not a worse model for this. With its best prompt it scored 22 of 32 on the rows I had at the time, against Qwen's 25, and it got every clear dependency row right. But "always produces a bare letter" is a property of how a model was tuned to follow instructions, and no benchmark score shows it. Mistral answered the first row correctly at probability 1.0 while holding four hundred-thousandths of the distribution. Without the declared mass, a model swap degrades quietly behind answers that still look confident. Having been caught three times by answers that looked fine, I now check that number first whenever a result seems wrong. Across every Qwen run in this post it is 1.0000 at the median and 0.9996 at the minimum.
+Mistral isn't a worse model for this. With its best prompt it scored 22 of 32 on the rows I had at the time, against Qwen's 25, and it got every clear dependency row right. But "always produces a bare letter" is a property of how a model was tuned to follow instructions, and no benchmark score shows it. Mistral answered the first row correctly at probability 1.0 with a declared mass of 0.00004. Without the declared mass, a model swap degrades quietly behind answers that still look confident. Having been caught three times by answers that looked fine, I now check that number first whenever a result seems wrong. Across every Qwen run in this post it's 1.0000 at the median and 0.9996 at the minimum.
 
 ## Getting a Model into Bedrock
 
-Custom Model Import takes a folder of model weights from S3 and gives you back a model that you call through the normal Bedrock runtime API. It supports a fixed list of architectures, Qwen3 among them, and runs in four regions, of which Frankfurt is the only one in Europe. There is no CloudFormation resource for it, so the import is a script run once from a GitHub Actions workflow: download the weights from Hugging Face one file at a time, upload each to S3, start the import job, and poll until it finishes. Qwen3-4B is eight gigabytes. Qwen3-32B, at sixty-five gigabytes, was imported as well, to see what eight times the parameters would buy. It shows up in the results below.
+Custom Model Import takes a folder of model weights from S3 and gives you back a model that you call through the normal Bedrock runtime API. It supports a fixed list of architectures, Qwen3 among them, and runs in four regions, of which Frankfurt is the only one in Europe. There is no CloudFormation resource for it, so the import is a script run once from a GitHub Actions workflow: download the weights from Hugging Face one file at a time, upload each to S3, start the import job, and poll until it finishes. Qwen3-4B is 8 GB. We also imported Qwen3-32B, at 65 GB, to see what eight times the parameters would buy. It shows up in the results below.
 
 > [!NOTE]
-> The supported list names the architecture, not the model family. For
-> Qwen that means `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`. A Qwen3.5
+> The supported list goes by architecture, not model family. For Qwen
+> that means `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`. A Qwen3.5
 > checkpoint, which is what the SemIf project this readout is ported
 > from runs on, reports a different architecture and the import job
 > rejects it, which is how this project ended up on Qwen3.
 
-The billing model is worth understanding before building on it. An imported model is charged per Custom Model Unit per minute while a copy of it is awake, in five-minute windows, and a copy goes to sleep after five minutes without a request. Qwen3-4B is one unit, which in Frankfurt costs $0.07144 a minute. The first request after a sleep does not wait for the copy to wake up. It fails, and keeps failing for thirty to sixty seconds, until the copy is ready. The bigger the model, the worse this gets. The 4B came up within nine retries, and neither Mistral nor the 32B did on their first request after import. The pipeline's state machine retries the decision step with a backoff that spans about five minutes for this reason, and the first log after a quiet spell needed four attempts before it got an answer.
+An imported model is charged per Custom Model Unit per minute while a copy of it is awake, in five-minute windows, and a copy goes to sleep after five minutes without a request. Qwen3-4B is one unit, which in Frankfurt costs $0.07144 a minute. The first request after a sleep doesn't wait for the copy to wake up. It fails, and keeps failing for thirty to sixty seconds, until the copy is ready. The bigger the model, the worse this gets. The 4B came up within nine retries, and neither Mistral nor the 32B did on their first request after import. The pipeline's state machine retries the decision step with a backoff that spans about five minutes for this reason, and the first log after a quiet spell needed four attempts before it got an answer.
 
 > [!NOTE]
-> The failures during a wake-up are not all the same. The first ones are
+> The failures during a wake-up aren't all the same. The first ones are
 > `ModelNotReadyException`, which the documentation tells you to retry.
 > The last one before it came up was `ModelErrorException` with the
 > message "the request failed in the model container", which reads like
@@ -127,7 +127,7 @@ The billing model is worth understanding before building on it. An imported mode
 
 ## Does It Decide Anything
 
-To find out whether the 4B could triage, and not only answer, the test set is a small labelled set of error logs across .NET, Java, Python, Node and Go. It is worth saying up front that the set is small and synthetic, and that the same person wrote the rows and the questions the model is asked, so the two are not independent. The numbers separate the approaches clearly, but I would not quote any of them as a property of the models.
+To find out whether the 4B could triage, and not only answer, the test set is a small labelled set of error logs across .NET, Java, Python, Node and Go. The set is small and synthetic, and I wrote both the rows and the questions, so the two aren't independent. The numbers separate the approaches clearly, but I would not quote any of them as a property of the models.
 
 | band | rows | what it tests |
 |---|---:|---|
@@ -145,13 +145,13 @@ With a single question, "is this a defect in this service's own code or a failur
 | Qwen3-32B | 6 of 12 | 3 of 12 |
 | Jev | 8 of 12 | 4 of 12 |
 
-The 4B gets the same five rows right with the evidence and without it, and on the rows it misses most confidently it reports a probability of exactly zero either way. It did not change a single answer when the evidence was taken away, which is hard to read as anything other than not using it. The 32B and Jev both drop sharply without the evidence, so they are reading it, but the 32B still ends up at six of twelve, and six of twelve is a coin toss.
+The 4B gets the same five rows right with the evidence and without it, and on the rows it misses most confidently it reports a probability of exactly zero either way. It didn't change a single answer when the evidence was taken away, so it isn't using it. The 32B and Jev both drop sharply without the evidence, so they are reading it, but the 32B still ends up at six of twelve, and six of twelve is a coin toss.
 
-The 4B also failed every numeric comparison I tried on it. Asked whether a 3,600 second refresh interval is longer than a 900 second token lifetime, it answered no with probability one. Asked whether 8,400 requests a minute is far above a baseline of 210, no again, probability one. Rephrasing did not help. Since the pipeline is code, I moved the arithmetic into code. A small step walks the evidence, finds the relations worth naming, and states each of them as a sentence before the model sees the row, along the lines of "connections_opened is 237 times connections_disposed (2841 against 12)". The model is then asked what a stated comparison means, which it can do, instead of being asked to compute it.
+The 4B also failed every numeric comparison I tried on it. Asked whether a 3,600 second refresh interval is longer than a 900 second token lifetime, it answered no with probability one. Asked whether 8,400 requests a minute is far above a baseline of 210, no again, probability one. Rephrasing didn't help. Since the pipeline is code, I moved the arithmetic into code. A small step walks the evidence, finds the relations worth naming, and states each of them as a sentence before the model sees the row, along the lines of "connections_opened is 237 times connections_disposed (2841 against 12)". The model is then asked what a stated comparison means, which it can do, instead of being asked to compute it.
 
 The bigger change was to stop asking the causal question altogether. Instead of one question that requires a leap from trace to cause, the 4B is asked ten small questions it can read straight off the evidence, such as whether a resource is being acquired far more often than it is released, or whether an external party recently changed its limits, and a few lines of code combine the answers. Five of the questions point to us, three to the outside, and two set the scene. One confident signal is enough for its side to score high, two of the "ours" signals are discounted when the other side has a reason, and when a row carries no evidence the code asks only the original question, since the signals would only be echoing the stack trace. The full list of questions and the combining rule are in [tree.json](https://github.com/ganhammar/observe-ai/blob/main/src/ObserveAi/Decide/tree.json) and the file next to it.
 
-The number that comes out sits between zero and one and behaves like a probability, but it is a score from a few lines of code, not something the model estimated. What it has over the single question is that it can land anywhere in between. The single question answered zero or one and nothing else, and a threshold cannot do anything with that.
+The number that comes out sits between zero and one and behaves like a probability, but a few lines of code compute it from the ten answers. What it has over the single question is that it can land anywhere in between. The single question answered zero or one and nothing else, and a threshold can't do anything with that.
 
 I iterated those questions three times against the original twelve ambiguous rows. Jev was run through the same ten questions, all in one request, which is how its API is meant to be used. On the rows the questions had been tuned against, the ten questions were worth four rows to either model, and the 4B and Jev came out level:
 
@@ -183,28 +183,28 @@ The rest of the system is there to give the decision somewhere to go. An account
 
 The execution asks the model the ten questions, all at once, when the event carries evidence, or the single question when it carries only a trace, and routes on the result. Below 0.3 the error is probably not ours and the execution ends. Above 0.7 it escalates. Between the two it is held, and today "held" means the execution ends with that reason and nothing else happens. A second pass with more evidence, or a person, belongs there. A rate cap per repository and a global circuit breaker sit in front of escalation, because a bad deploy that breaks fifty services at once should page someone rather than open fifty issues at three in the morning.
 
-Escalation fetches the files the stack frames name through the GitHub Contents API, five at most, from the `main` branch, and never clones anything. Nothing in the log says which commit was running, so for each frame it asks the 4B one more typed question, "could this code throw this exception here", which catches the obvious mismatches, where `main` no longer has code that could throw there, and nothing subtler. It then sends the trace and the fetched files to Amazon Nova 2 Lite through the Converse API, the one generative call in the whole pipeline, and asks for a root cause in at most three sentences. The result is an issue:
+Escalation fetches the files the stack frames name through the GitHub Contents API, five at most, from the `main` branch, and never clones anything. The log doesn't say which commit was running, so `main` might not match what actually threw. For each frame, the 4B gets one more typed question: could this code throw this exception here? That catches the obvious cases, where the code is gone from `main`. It won't catch anything subtler. It then sends the trace and the fetched files to Amazon Nova 2 Lite through the Converse API, the one generative call in the whole pipeline, and asks for a root cause in at most three sentences. The result is an issue:
 
 > [!NOTE]
 > Nova has to be called through its cross-region inference profile,
-> `eu.amazon.nova-2-lite-v1:0`, not the bare model id. The bare id is
-> not enabled for on-demand use in Frankfurt, and the profile keeps the
+> `eu.amazon.nova-2-lite-v1:0`, not the bare model id. The bare id
+> isn't enabled for on-demand use in Frankfurt, and the profile keeps the
 > request inside EU regions. The IAM grant then needs both the profile
 > and the underlying foundation model in every region it can route to.
 
 ![Issue filed by the pipeline](./assets/system-one-issue.png)
 
-That issue was filed forty seconds after a Python function threw a `KeyError` on a tier name it did not know. The stack trace named `handler.py`, the pipeline fetched it, the 4B confirmed the code could throw there, and Nova quoted the offending line and described the missing validation. The whole path from log line to issue is a handful of typed decisions and one paragraph of generated text.
+That issue was filed forty seconds after a Python function threw a `KeyError` on a tier name it didn't know. The stack trace named `handler.py`, the pipeline fetched it, the 4B confirmed the code could throw there, and Nova quoted the offending line and described the missing validation.
 
 ## Speed, Structure and Cost
 
 A System One model is sold on three things: it answers quickly, the answer is a typed decision with a confidence attached, and it costs a fraction of a generating model. Those hold for Jev against an ordinary language model. Here is each of the three for the 4B on Bedrock, measured from a Lambda in Frankfurt, with Jev's figures alongside.
 
-**Fast.** A warm Qwen3-4B answers one question in 0.10 seconds at the median and 0.20 at the 95th percentile. The ten questions take 0.78 seconds one after another. The Lambda sends them all at once, since none depends on another's answer, so a full decision should take about as long as the slowest of the ten, but that concurrent figure was not measured, and 0.78 is the upper bound. Jev answers in 0.53 seconds whether the request carries one question or all ten, since it takes them in a single call. What Jev does not have is the cold start described above. If your logs arrive in bursts with quiet gaps between them, every burst pays it.
+**Fast.** A warm Qwen3-4B answers one question in 0.10 seconds at the median and 0.20 at the 95th percentile. The ten questions take 0.78 seconds one after another. The Lambda sends them all at once, since none depends on another's answer, so a full decision should take about as long as the slowest of the ten, but that concurrent figure was not measured, and 0.78 is the upper bound. Jev answers in 0.53 seconds whether the request carries one question or all ten, since it takes them in a single call. What Jev doesn't have is the cold start described above. If your logs arrive in bursts with quiet gaps between them, every burst pays it.
 
 **Structured.** Both return a probability per option. Jev's come rounded to two decimals, with a separate confidence field. The readout's come from the model's distribution directly, and with them comes the declared mass, the number that told me Mistral was answering a different question.
 
-There is also the question of whether the probabilities mean anything, called calibration. When a model says 0.7, is it right about seven times in ten? The usual measure is expected calibration error, the average gap between what the model claimed and how often it was actually right, where zero is perfect. With this few rows the figure is rough, so treat the table as a sketch:
+Then there's calibration. When a model says 0.7, is it right about seven times in ten? The usual measure is expected calibration error, the average gap between what the model claimed and how often it was actually right, where zero is perfect. With this few rows the figure is rough, so treat the table as a sketch:
 
 | calibration error, lower is better | tuned rows | held-out rows |
 |---|---:|---:|
@@ -215,29 +215,29 @@ There is also the question of whether the probabilities mean anything, called ca
 The ten questions gave the 4B the best number on the rows they were tuned against and the worst on the rows they were not. Jev went the other way.
 
 > [!NOTE]
-> The Jev comparison is not perfectly like for like. Jev received the
+> The Jev comparison isn't perfectly like for like. Jev received the
 > option descriptions as its own named criteria and applied its own
-> prompting, while the Bedrock path sends a frozen prompt. It is a fair
-> reference point for the same rows, not the same prompt on two models.
+> prompting, while the Bedrock path sends a frozen prompt. Treat it as
+> a reference point on the same rows, since the prompts differ.
 
-**Cheap.** Jev charges $0.042 per million input tokens and nothing for output. A ten-question request measured about 1,450 tokens, so a full triage decision costs six thousandths of a cent, and a single question about a third of that. The 4B's cost depends on how long a copy is awake rather than on how many decisions it makes. The table covers the decision model only, not the Lambda, Step Functions, DynamoDB or Nova around it:
+**Cheap.** Jev charges $0.042 per million input tokens and nothing for output. A ten-question request measured about 1,450 tokens, so a full triage decision costs $0.00006, and a single question about a third of that. The 4B's cost depends on how long a copy is awake rather than on how many decisions it makes. The table covers the decision model only, not the Lambda, Step Functions, DynamoDB or Nova around it:
 
 | how the copy is used | Qwen3-4B per month | per decision at 10,000 a month | Jev, same volume |
 |---|---:|---:|---:|
 | awake all month, whether from a trickle of logs or by design | $3,090 | 31 cents | 60 cents in total |
 | woken once an hour to drain a batch | $257 | 2.6 cents | 60 cents in total |
 
-For the awake-all-month copy to break even with Jev it would need about fifty million decisions a month, which is nineteen a second from one copy, and I did not measure whether it can sustain that.
+For the awake-all-month copy to break even with Jev it would need about fifty million decisions a month, which is nineteen a second from one copy, and I didn't measure whether it can sustain that.
 
-A hosted service is cheaper per decision at every volume I can vouch for. The self-hosted model gives you something else. The weights are yours, the prompt and the chat template are yours, no provider beyond AWS sees your logs, and the decision call never leaves eu-central-1. The rest of this pipeline is less strict. Nova is called through a profile that can route to any EU region, and the issue goes to GitHub. If your logs cannot leave your region, or your compliance story needs the model to be something you own, the decision step is the part the 4B gives you, and the table above is what it costs. The rest would need the same treatment.
+A hosted service is cheaper per decision at every volume I can vouch for. The self-hosted model gives you something else. The weights are yours, the prompt and the chat template are yours, no provider beyond AWS sees your logs, and the decision call never leaves eu-central-1. The rest of this pipeline is less strict. Nova is called through a profile that can route to any EU region, and the issue goes to GitHub. If your logs can't leave your region, or your compliance story needs the model to be something you own, the decision step is the part the 4B gives you, and the table above is what it costs. The rest would need the same treatment.
 
 ## Tradeoffs
 
 There is no code fix for the cold start. Anything built on Custom Model Import at low volume either accepts a failed first request after every quiet spell, or keeps the copy awake and pays for it.
 
-The 4B does not work out who changed something, as the held-out rows showed. Given evidence that says a change was ours, it registers the change and blames someone else. Moving the arithmetic and the "whose deploy was that" comparisons into code helped on the rows I could tune against and did not generalise, while a purpose-trained model handles the same text without help. Breaking the question down helped during development, and it turns a yes-or-no answer into a gradient a threshold can act on, but the held-out rows did not show a benefit from it. Whether that gradient is trustworthy enough to route on is not something twelve rows can settle, and the thresholds in the pipeline are choices, not measurements.
+The 4B can't tell who changed something. Moving the arithmetic and the "whose deploy was that" comparisons into code helped on the rows I could tune against and didn't generalise, while a purpose-trained model handles the same text without help. Breaking the question down helped during development, and it turns a yes-or-no answer into a gradient a threshold can act on, but the held-out rows didn't show a benefit from it. Twelve rows can't settle whether that gradient is trustworthy enough to route on, and I picked the pipeline's thresholds without measuring them.
 
-The evidence is not being gathered yet. The deployed pipeline sees a stack trace and nothing else, and on the held-out rows that trace-only path scores 9 of 12 for the 4B and 10 of 12 for Jev. Correlating a trace with metrics, deploys and dependency health at the moment it fired is the next piece of work, and it is not a small one.
+The evidence isn't being gathered yet. The deployed pipeline sees a stack trace and nothing else, and on the held-out rows that trace-only path scores 9 of 12 for the 4B and 10 of 12 for Jev. Correlating a trace with metrics, deploys and dependency health at the moment it fired is the next piece of work, and it isn't a small one.
 
 ## Companion Repository
 
