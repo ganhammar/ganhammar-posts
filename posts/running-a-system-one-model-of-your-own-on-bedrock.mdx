@@ -14,7 +14,7 @@ Earlier this month TypeSafe AI released [Jev](https://docs.typesafe.ai/models), 
 
 I wanted to know how much of that you can get from an open model you run yourself, on your own AWS account, in your own region, and what it costs. To have something real to decide about, I built a pipeline that reads every error log in an AWS account, decides whether each error comes from our own code, and files a GitHub issue with a root cause when it does.
 
-TLDR: the readout technique works on an open model, but a small open model didn't keep up with Jev on cases it hadn't been tuned against, and at low volume it isn't the cheaper option either. What it buys you is a model, and your logs, that never leave your AWS account.
+TLDR: the readout works on an open model. A Qwen3-4B on Bedrock answers in a tenth of a second, matched Jev on the rows it was tuned against, and filed a real GitHub issue with the right root cause forty seconds after the error. On rows it hadn't seen it fell behind Jev, and at low volume it isn't cheaper. What it buys you is a model, and your logs, that never leave your AWS account.
 
 ## What We Are Building
 
